@@ -224,13 +224,61 @@ let cdTimer     = null;
 // ── Supabase REST helper ─────────────────────────────────────────
 async function sbFetch(table, params='') {
   const r = await fetch(`${SUPA_URL}/rest/v1/${table}?${params}`, {
-    headers:{ 'apikey': SUPA_KEY, 'Authorization': `Bearer ${SUPA_KEY}` }
+    headers:{
+      'apikey': SUPA_KEY,
+      'Authorization': `Bearer ${SUPA_KEY}`,
+      'Accept': 'application/json'
+    }
   });
-  if (!r.ok) throw new Error(`SB ${r.status}`);
+  if (!r.ok) {
+    const txt = await r.text().catch(()=>'');
+    throw new Error(`[${table}] HTTP ${r.status}: ${txt.slice(0,120)}`);
+  }
   return r.json();
 }
 
-// ── Colour helpers ───────────────────────────────────────────────
+// ── Main fetch + render ──────────────────────────────────────────
+async function fetchAll() {
+  setStatus('⏳ Fetching...', false);
+  try {
+    // Independent fetches — one failure won't block others
+    const [panelRows, aiRows, rounds, accRows, logRows] = await Promise.all([
+      sbFetch('panel_predictions',
+        `game_code=eq.${currentGame}&order=created_at.desc&limit=1&select=*`
+      ).catch(e=>{ console.warn('panel_predictions:', e.message); return []; }),
+
+      sbFetch('ai_predictions',
+        `game_code=eq.${currentGame}&order=created_at.desc&limit=1&select=*`
+      ).catch(e=>{ console.warn('ai_predictions latest:', e.message); return []; }),
+
+      sbFetch('rounds',
+        `game_code=eq.${currentGame}&order=created_at.desc&limit=10&select=*`
+      ).catch(e=>{ console.warn('rounds:', e.message); return []; }),
+
+      sbFetch('ai_predictions',
+        `game_code=eq.${currentGame}&ai_correct=not.is.null&order=created_at.desc&limit=50&select=ai_correct,panel_correct,match_panel`
+      ).catch(e=>{ console.warn('acc:', e.message); return []; }),
+
+      sbFetch('ai_predictions',
+        `game_code=eq.${currentGame}&actual_result=not.is.null&order=created_at.desc&limit=10&select=*`
+      ).catch(e=>{ console.warn('logs:', e.message); return []; })
+    ]);
+
+    const panel = panelRows?.[0] || null;
+    const ai    = aiRows?.[0]    || null;
+
+    renderAll(panel, ai, rounds||[], accRows||[], logRows||[]);
+    setStatus('✅ Live', true);
+    document.getElementById('last-upd').textContent =
+      new Date().toLocaleTimeString('en-IN',{hour:'2-digit',minute:'2-digit',second:'2-digit'});
+    startCountdown();
+  } catch(e) {
+    renderError(e.message);
+    setStatus('❌ Error', false);
+    startCountdown(15);
+  }
+}
+
 const NUM_COL = n => n===0||n===5?'v': n%2===0?'r':'g';
 function colDots(str='') {
   const s = str.toLowerCase();
@@ -253,40 +301,7 @@ function bsColor(v) {
 }
 
 // ── Main fetch + render ──────────────────────────────────────────
-async function fetchAll() {
-  setStatus('⏳ Fetching...', false);
-  try {
-    // Parallel fetch
-    const [panelRows, aiRows, rounds, accRows] = await Promise.all([
-      sbFetch('panel_predictions',
-        `game_code=eq.${currentGame}&order=created_at.desc&limit=1&select=*`),
-      sbFetch('ai_predictions',
-        `game_code=eq.${currentGame}&order=created_at.desc&limit=1&select=*`),
-      sbFetch('rounds',
-        `game_code=eq.${currentGame}&order=created_at.desc&limit=10&select=number,colour,big_small,period`),
-      sbFetch('ai_predictions',
-        `game_code=eq.${currentGame}&ai_correct=not.is.null&order=created_at.desc&limit=50&select=ai_correct,panel_correct,match_panel`)
-    ]);
 
-    const panel = panelRows?.[0] || null;
-    const ai    = aiRows?.[0] || null;
-
-    // Prediction logs (last 10 where we have actual results)
-    const logRows = await sbFetch('ai_predictions',
-      `game_code=eq.${currentGame}&actual_result=not.is.null&order=created_at.desc&limit=10&select=period,prediction,panel_pred,actual_result,actual_number,actual_colour,ai_correct,panel_correct,colour_pred,top_numbers`
-    ).catch(()=>[]);
-
-    renderAll(panel, ai, rounds||[], accRows||[], logRows||[]);
-    setStatus('✅ Live', true);
-    document.getElementById('last-upd').textContent =
-      new Date().toLocaleTimeString('en-IN',{hour:'2-digit',minute:'2-digit',second:'2-digit'});
-    startCountdown();
-  } catch(e) {
-    renderError(e.message);
-    setStatus('❌ Error', false);
-    startCountdown(15);
-  }
-}
 
 function startCountdown(secs) {
   if (cdTimer) clearInterval(cdTimer);
