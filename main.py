@@ -489,3 +489,113 @@ async def update_actual(data: dict):
         return {"updated": len(rows)}
     except Exception as e:
         return {"error": str(e)}
+
+import httpx
+
+# ── /live endpoint: server-side fetch from WinGo draw API ────────
+@app.get("/live/{game_code}")
+async def live_predict(game_code: str):
+    """
+    Standalone endpoint for PWA / mobile use.
+    Fetches latest rounds from WinGo draw API server-side (no CORS),
+    stores new rounds in Supabase, returns full prediction.
+    """
+    rounds_raw = []
+
+    # 1. Try WinGo public draw API (no auth needed)
+    draw_urls = [
+        f"https://draw.ar-lottery01.com/WinGo/{game_code}.json",
+        f"https://draw.ar-lottery01.com/WinGo/{game_code}/GetHistoryIssuePage.json",
+    ]
+    async with httpx.AsyncClient(timeout=8.0) as client:
+        for url in draw_urls:
+            try:
+                r = await client.get(url, params={"ts": int(__import__("time").time()*1000)})
+                if r.status_code == 200:
+                    data = r.json()
+                    # Try different response shapes
+                    items = (data.get("data") or data.get("list") or
+                             (data if isinstance(data, list) else []))
+                    if items:
+                        rounds_raw = items[:30]
+                        break
+            except:
+                continue
+
+    # 2. Fall back to Supabase if draw API unreachable
+    if not rounds_raw:
+        db = fetch_history(game_code, limit=50)
+        if db:
+            rounds_raw = [{"issueNumber": r.get("period",""), "number": r.get("number",0),
+                            "colour": r.get("colour","red"), "big_small": r.get("big_small","Small")}
+                          for r in db[:30]]
+
+    if not rounds_raw:
+        return {"error": "No data available", "game_code": game_code}
+
+    # 3. Parse rounds
+    def parse_colour(num: int, colour_str: str) -> str:
+        c = (colour_str or "").lower()
+        if c: return c
+        mapping = {0:"red,violet",1:"green",2:"red",3:"green",4:"red",
+                   5:"green,violet",6:"red",7:"green",8:"red",9:"green"}
+        return mapping.get(num, "red")
+
+    rounds = []
+    for item in rounds_raw:
+        try:
+            num = int(item.get("number", 0))
+            col = parse_colour(num, item.get("colour") or item.get("color",""))
+            bs  = "Big" if num >= 5 else "Small"
+            rounds.append({"number": num, "colour": col, "big_small": bs,
+                           "issueNumber": str(item.get("issueNumber",""))})
+        except:
+            continue
+
+    if len(rounds) < 10:
+        return {"error": f"Not enough rounds: {len(rounds)}", "game_code": game_code}
+
+    # 4. Store new rounds in Supabase
+    try:
+        existing_periods = {r.get("period","") for r in fetch_history(game_code, limit=50)}
+        new_rows = [{"period": r["issueNumber"], "number": r["number"],
+                     "colour": r["colour"], "big_small": r["big_small"],
+                     "game_code": game_code}
+                    for r in rounds if r["issueNumber"] and r["issueNumber"] not in existing_periods]
+        if new_rows:
+            supabase.table("rounds").insert(new_rows).execute()
+    except: pass
+
+    # 5. Current period = next after latest
+    try:
+        latest_period = rounds[0]["issueNumber"]
+        next_period = str(int(latest_period) + 1) if latest_period.isdigit() else ""
+    except:
+        next_period = ""
+
+    # 6. Run prediction using the rounds as recent_rounds
+    recent = [RoundData(number=r["number"], colour=r["colour"], big_small=r["big_small"])
+              for r in rounds[:30]]
+    req = PredictRequest(game_code=game_code, period=next_period, recent_rounds=recent)
+
+    pred_result = await predict(req)
+
+    # 7. Bias detection
+    full_history = fetch_history(game_code, limit=300)
+    bias = detect_bias(full_history) if full_history else {"is_biased": False}
+
+    # 8. Accuracy stats
+    stats = fetch_accuracy_stats(game_code)
+
+    return {
+        "game_code":        game_code,
+        "current_period":   next_period,
+        "latest_number":    rounds[0]["number"],
+        "latest_colour":    rounds[0]["colour"],
+        "recent_rounds":    rounds[:10],
+        "prediction":       pred_result.dict(),
+        "bias":             bias,
+        "accuracy":         stats,
+        "data_source":      "draw_api" if rounds_raw and not all(r.get("period","") in [""] for r in rounds_raw[:1]) else "supabase"
+    }
+

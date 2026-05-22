@@ -1,0 +1,550 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no"/>
+<meta name="theme-color" content="#7c3aed"/>
+<meta name="apple-mobile-web-app-capable" content="yes"/>
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent"/>
+<meta name="apple-mobile-web-app-title" content="WinGo AI"/>
+<title>WinGo AI Predictor</title>
+<link rel="manifest" href="manifest.json"/>
+<link rel="apple-touch-icon" href="icon-192.png"/>
+<link rel="preconnect" href="https://fonts.googleapis.com"/>
+<link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;600;700;800;900&display=swap" rel="stylesheet"/>
+<style>
+*{margin:0;padding:0;box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+html,body{height:100%;overflow:hidden}
+body{
+  font-family:'Outfit',sans-serif;
+  background:#0a0a14;
+  color:#e2e8f0;
+  display:flex;flex-direction:column;
+  height:100dvh;
+  overflow:hidden;
+}
+
+/* ── Header ── */
+.hdr{
+  background:linear-gradient(135deg,#7c3aed 0%,#3b82f6 100%);
+  padding:env(safe-area-inset-top,12px) 16px 12px;
+  display:flex;align-items:center;justify-content:space-between;
+  flex-shrink:0;
+}
+.hdr-title{font-size:17px;font-weight:800;letter-spacing:-.3px}
+.hdr-sub{font-size:10px;opacity:.75;margin-top:1px}
+.live-dot{width:8px;height:8px;border-radius:50%;background:#4ade80;
+  animation:pulse 1.5s infinite;display:inline-block;margin-right:5px}
+@keyframes pulse{0%,100%{box-shadow:0 0 0 0 rgba(74,222,128,.5)}
+  50%{box-shadow:0 0 0 5px rgba(74,222,128,0)}}
+
+/* ── Game tabs ── */
+.tabs{
+  display:flex;gap:0;background:#111827;
+  border-bottom:1px solid rgba(255,255,255,.06);
+  flex-shrink:0;overflow-x:auto;
+  scrollbar-width:none;
+}
+.tabs::-webkit-scrollbar{display:none}
+.tab{
+  flex:0 0 auto;padding:10px 14px;font-size:12px;font-weight:700;
+  color:#64748b;cursor:pointer;border-bottom:2px solid transparent;
+  transition:all .2s;white-space:nowrap;
+}
+.tab.active{color:#a78bfa;border-bottom-color:#7c3aed;background:rgba(124,58,237,.08)}
+
+/* ── Main scroll area ── */
+.body{
+  flex:1;overflow-y:auto;
+  padding:12px;
+  overscroll-behavior:contain;
+  scrollbar-width:thin;
+  scrollbar-color:rgba(124,58,237,.3) transparent;
+}
+
+/* ── Cards ── */
+.card{
+  background:rgba(255,255,255,.04);
+  border:1px solid rgba(255,255,255,.07);
+  border-radius:14px;padding:14px;margin-bottom:10px;
+}
+.card-header{
+  display:flex;justify-content:space-between;align-items:center;
+  margin-bottom:10px;padding-bottom:8px;
+  border-bottom:1px solid rgba(255,255,255,.06);
+}
+.card-title{font-size:12px;font-weight:800;color:#a78bfa}
+
+/* ── Countdown ── */
+.countdown-wrap{
+  display:flex;flex-direction:column;align-items:center;
+  padding:8px 0 4px;
+}
+.countdown-ring{position:relative;width:90px;height:90px;margin-bottom:6px}
+.countdown-ring svg{transform:rotate(-90deg)}
+.countdown-ring circle{transition:stroke-dashoffset .5s linear;stroke-linecap:round}
+.countdown-num{
+  position:absolute;inset:0;display:flex;flex-direction:column;
+  align-items:center;justify-content:center;
+}
+.countdown-sec{font-size:26px;font-weight:900;color:#fff;line-height:1}
+.countdown-lbl{font-size:9px;color:#64748b;margin-top:2px}
+.period-txt{font-size:10px;color:#475569;font-family:monospace}
+
+/* ── Signal badge ── */
+.signal-badge{
+  display:inline-flex;align-items:center;gap:5px;
+  padding:5px 12px;border-radius:20px;font-size:11px;font-weight:800;
+  margin-bottom:10px;
+}
+.signal-strong{background:linear-gradient(90deg,#166534,#16a34a);color:#fff}
+.signal-split{background:linear-gradient(90deg,#92400e,#d97706);color:#fff}
+.signal-moderate{background:linear-gradient(90deg,#1e3a8a,#2563eb);color:#fff}
+.signal-weak{background:#1f2937;color:#64748b}
+
+/* ── Prediction grid ── */
+.pred-grid{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:8px}
+.pred-cell{
+  background:rgba(255,255,255,.04);border-radius:10px;
+  padding:10px;text-align:center;
+  border:1px solid rgba(255,255,255,.06);
+}
+.pred-label{font-size:10px;color:#64748b;margin-bottom:5px}
+.pred-big{
+  font-size:20px;font-weight:900;padding:6px 14px;
+  border-radius:8px;display:inline-block;
+}
+.pred-big.BIG{background:linear-gradient(135deg,#1d4ed8,#3b82f6);color:#fff}
+.pred-big.SMALL{background:linear-gradient(135deg,#15803d,#22c55e);color:#fff}
+
+/* ── Colour display ── */
+.colour-dots{display:flex;align-items:center;justify-content:center;gap:6px;flex-wrap:wrap}
+.cdot{width:12px;height:12px;border-radius:50%;flex-shrink:0}
+.cdot-red{background:#ef4444}
+.cdot-green{background:#22c55e}
+.cdot-violet{background:#a855f7}
+
+/* ── Number balls ── */
+.numballs{display:flex;align-items:center;justify-content:center;gap:6px;flex-wrap:wrap}
+.nball{
+  width:32px;height:32px;border-radius:50%;
+  display:flex;align-items:center;justify-content:center;
+  font-size:14px;font-weight:900;color:#fff;
+  border:2px solid rgba(255,255,255,.2);
+}
+
+/* ── Confidence bar ── */
+.conf-bar-wrap{margin-top:8px}
+.conf-bar-track{
+  background:rgba(255,255,255,.07);border-radius:6px;height:6px;overflow:hidden;
+}
+.conf-bar-fill{
+  height:100%;border-radius:6px;
+  background:linear-gradient(90deg,#7c3aed,#3b82f6);
+  transition:width .5s ease;
+}
+.conf-label{
+  display:flex;justify-content:space-between;margin-bottom:3px;
+  font-size:10px;color:#64748b;
+}
+
+/* ── Recent rounds ── */
+.rounds-grid{
+  display:grid;grid-template-columns:repeat(5,1fr);gap:4px;
+}
+.round-cell{
+  display:flex;flex-direction:column;align-items:center;gap:2px;
+  padding:5px 3px;border-radius:7px;
+  background:rgba(255,255,255,.03);
+}
+.round-num{
+  width:28px;height:28px;border-radius:50%;
+  display:flex;align-items:center;justify-content:center;
+  font-size:12px;font-weight:800;color:#fff;
+}
+.round-num.red{background:#dc2626}
+.round-num.green{background:#16a34a}
+.round-num.violet{background:#7c3aed}
+.round-bs{font-size:8px;color:#64748b;font-weight:700}
+
+/* ── Accuracy boxes ── */
+.acc-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:6px}
+.acc-box{
+  background:rgba(255,255,255,.04);border-radius:8px;
+  padding:8px 4px;text-align:center;
+  border:1px solid rgba(255,255,255,.06);
+}
+.acc-val{font-size:18px;font-weight:900;margin:2px 0}
+.acc-lbl{font-size:8px;color:#64748b}
+.acc-sub{font-size:8px;color:#334155;margin-top:1px}
+
+/* ── Bias alert ── */
+.bias-alert{
+  background:rgba(245,158,11,.1);border:1px solid rgba(245,158,11,.3);
+  border-radius:10px;padding:10px 12px;margin-bottom:10px;
+  font-size:11px;color:#fbbf24;
+}
+
+/* ── Refresh btn ── */
+.refresh-btn{
+  width:100%;padding:12px;border-radius:12px;font-size:14px;font-weight:800;
+  border:none;cursor:pointer;
+  background:linear-gradient(135deg,#7c3aed,#3b82f6);
+  color:#fff;margin-top:4px;margin-bottom:16px;
+  display:flex;align-items:center;justify-content:center;gap:8px;
+  transition:opacity .15s;
+}
+.refresh-btn:active{opacity:.7}
+.refresh-btn.loading{opacity:.6;pointer-events:none}
+
+/* ── Status bar ── */
+.status-bar{
+  background:#111827;border-top:1px solid rgba(255,255,255,.06);
+  padding:6px 12px env(safe-area-inset-bottom,6px);
+  display:flex;align-items:center;justify-content:space-between;
+  flex-shrink:0;font-size:10px;color:#475569;
+}
+
+/* ── Loading skeleton ── */
+.skeleton{
+  background:linear-gradient(90deg,rgba(255,255,255,.04) 25%,rgba(255,255,255,.08) 50%,rgba(255,255,255,.04) 75%);
+  background-size:200% 100%;
+  animation:shimmer 1.5s infinite;
+  border-radius:8px;
+}
+@keyframes shimmer{0%{background-position:200% 0}100%{background-position:-200% 0}}
+
+/* ── Error card ── */
+.error-card{
+  background:rgba(239,68,68,.08);border:1px solid rgba(239,68,68,.2);
+  border-radius:12px;padding:16px;text-align:center;color:#fca5a5;
+  font-size:12px;
+}
+</style>
+</head>
+<body>
+
+<!-- Header -->
+<div class="hdr">
+  <div>
+    <div class="hdr-title">🔮 WinGo AI Predictor</div>
+    <div class="hdr-sub" id="hdr-sub">Connecting...</div>
+  </div>
+  <div style="text-align:right">
+    <div style="font-size:9px;color:rgba(255,255,255,.6)">Auto-refresh</div>
+    <div id="next-refresh" style="font-size:12px;font-weight:700;color:#4ade80">—</div>
+  </div>
+</div>
+
+<!-- Game Tabs -->
+<div class="tabs" id="tabs">
+  <div class="tab active" data-code="WinGo_30S" onclick="selectGame(this)">⚡ 30s</div>
+  <div class="tab" data-code="WinGo_1Min" onclick="selectGame(this)">1 Min</div>
+  <div class="tab" data-code="WinGo_3Min" onclick="selectGame(this)">3 Min</div>
+  <div class="tab" data-code="WinGo_5Min" onclick="selectGame(this)">5 Min</div>
+</div>
+
+<!-- Body -->
+<div class="body" id="main-body">
+  <div id="content">
+    <div style="text-align:center;padding:40px 20px">
+      <div class="skeleton" style="height:90px;width:90px;border-radius:50%;margin:0 auto 16px"></div>
+      <div class="skeleton" style="height:16px;width:60%;margin:0 auto 8px"></div>
+      <div class="skeleton" style="height:12px;width:40%;margin:0 auto"></div>
+    </div>
+  </div>
+</div>
+
+<!-- Status Bar -->
+<div class="status-bar">
+  <span id="status-txt"><span class="live-dot"></span> Live</span>
+  <span id="data-source-txt" style="color:#334155">—</span>
+  <span id="last-update-txt">—</span>
+</div>
+
+<script>
+const AI_URL = 'https://wingo-ai-kwcs.onrender.com';
+let currentGame = 'WinGo_30S';
+let lastData = null;
+let refreshTimer = null;
+let countdownTimer = null;
+let nextRefreshIn = 0;
+
+// ── Game intervals (seconds) ────────────────────────────────────
+const GAME_INTERVAL = {
+  'WinGo_30S': 30, 'WinGo_1Min': 60,
+  'WinGo_3Min': 180, 'WinGo_5Min': 300
+};
+
+// ── Colour helpers ───────────────────────────────────────────────
+const NUM_COLOURS = {
+  0:'violet',1:'green',2:'red',3:'green',4:'red',
+  5:'violet',6:'red',7:'green',8:'red',9:'green'
+};
+function numColour(n) {
+  if (n===0||n===5) return 'violet';
+  return n%2===0 ? 'red' : 'green';
+}
+function colourDots(colStr) {
+  const c = (colStr||'').toLowerCase();
+  let h = '';
+  if (c.includes('red'))    h += '<span class="cdot cdot-red" title="Red"></span>';
+  if (c.includes('green'))  h += '<span class="cdot cdot-green" title="Green"></span>';
+  if (c.includes('violet')) h += '<span class="cdot cdot-violet" title="Violet"></span>';
+  return h || `<span style="font-size:11px;color:#64748b">${colStr}</span>`;
+}
+function numBall(n, size=32) {
+  const c = n===0||n===5 ? '#7c3aed' : n%2===0 ? '#dc2626' : '#16a34a';
+  return `<div class="nball" style="width:${size}px;height:${size}px;background:${c};font-size:${size*0.42}px">${n}</div>`;
+}
+
+// ── Select game ─────────────────────────────────────────────────
+function selectGame(el) {
+  document.querySelectorAll('.tab').forEach(t=>t.classList.remove('active'));
+  el.classList.add('active');
+  currentGame = el.dataset.code;
+  clearTimers();
+  fetchAndRender();
+}
+
+// ── Fetch from AI server ─────────────────────────────────────────
+async function fetchAndRender() {
+  setStatus('Fetching...', false);
+  try {
+    const r = await fetch(`${AI_URL}/live/${currentGame}`, {
+      method: 'GET',
+      headers: { 'Content-Type': 'application/json' }
+    });
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    const data = await r.json();
+    if (data.error) throw new Error(data.error);
+    lastData = data;
+    renderAll(data);
+    setStatus('Live ✅', true);
+    document.getElementById('data-source-txt').textContent =
+      data.data_source === 'draw_api' ? '🌐 Live API' : '🗄️ Supabase';
+    document.getElementById('last-update-txt').textContent =
+      new Date().toLocaleTimeString('en-IN', {hour:'2-digit',minute:'2-digit',second:'2-digit'});
+    scheduleRefresh();
+  } catch(e) {
+    renderError(e.message);
+    setStatus('Error ❌', false);
+    scheduleRefresh(15);
+  }
+}
+
+// ── Schedule auto-refresh ────────────────────────────────────────
+function scheduleRefresh(secs) {
+  clearTimers();
+  const interval = secs || GAME_INTERVAL[currentGame] || 30;
+  nextRefreshIn = interval;
+  countdownTimer = setInterval(() => {
+    nextRefreshIn--;
+    document.getElementById('next-refresh').textContent = `${nextRefreshIn}s`;
+    if (nextRefreshIn <= 0) {
+      clearTimers();
+      fetchAndRender();
+    }
+  }, 1000);
+}
+
+function clearTimers() {
+  if (countdownTimer) clearInterval(countdownTimer);
+  if (refreshTimer)   clearTimeout(refreshTimer);
+}
+
+// ── Status bar ───────────────────────────────────────────────────
+function setStatus(msg, live) {
+  document.getElementById('status-txt').innerHTML =
+    `${live ? '<span class="live-dot"></span>' : '⏳'} ${msg}`;
+  document.getElementById('hdr-sub').textContent =
+    currentGame.replace('WinGo_','').replace('Min',' Min').replace('S','s');
+}
+
+// ── Main render ──────────────────────────────────────────────────
+function renderAll(data) {
+  const pred   = data.prediction || {};
+  const bias   = data.bias || {};
+  const acc    = data.accuracy || {};
+  const rounds = data.recent_rounds || [];
+
+  // Signal
+  const sig  = pred.combined_signal || 'MODERATE';
+  const sigCls = sig === 'STRONG' ? 'signal-strong' : sig === 'SPLIT' ? 'signal-split' :
+                 sig === 'MODERATE' ? 'signal-moderate' : 'signal-weak';
+  const sigTxt = sig === 'STRONG' ? '✅ CONFIRMED — Both Agree!' :
+                 sig === 'SPLIT'  ? '⚠️ SPLIT — Panel vs AI' :
+                 sig === 'MODERATE' ? '🔵 MODERATE Signal' : '⬜ WEAK Signal';
+
+  // Confidence colour
+  const conf = pred.combined_confidence || pred.confidence || 50;
+  const confCol = conf >= 70 ? '#4ade80' : conf >= 55 ? '#facc15' : '#94a3b8';
+
+  // Bias alert
+  const biasHtml = bias.is_biased ? `
+    <div class="bias-alert">
+      ⚠️ <b>Platform Bias Detected!</b><br>
+      ${bias.bias_direction} favored — Big:${bias.big_pct}% | Green:${bias.green_pct}%
+      (${bias.samples} samples)
+    </div>` : '';
+
+  // Recent rounds
+  const roundsHtml = rounds.map(r => {
+    const cls = r.colour?.includes('violet') ? 'violet' :
+                r.colour?.includes('green') ? 'green' : 'red';
+    return `<div class="round-cell">
+      <div class="round-num ${cls}">${r.number}</div>
+      <div class="round-bs">${r.number>=5?'B':'S'}</div>
+    </div>`;
+  }).join('');
+
+  // Numbers balls
+  const numBalls = (pred.top_numbers || []).map(n => numBall(n, 36)).join('');
+
+  // Accuracy
+  const aiAcc    = acc.ai_acc || '—';
+  const panelAcc = acc.panel_acc || '—';
+  const combAcc  = acc.agreement_acc || '—';
+
+  document.getElementById('content').innerHTML = `
+    <!-- Period + Signal -->
+    <div class="card" style="padding:12px 14px 10px">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
+        <div>
+          <div style="font-size:9px;color:#475569;margin-bottom:2px">PREDICTING PERIOD</div>
+          <div style="font-size:11px;font-weight:700;color:#e2e8f0;font-family:monospace">${data.current_period || '—'}</div>
+        </div>
+        <div style="text-align:right">
+          <div style="font-size:9px;color:#475569;margin-bottom:2px">LAST RESULT</div>
+          <div style="display:flex;align-items:center;gap:6px;justify-content:flex-end">
+            ${numBall(data.latest_number ?? 0, 26)}
+            <span style="font-size:11px;color:#94a3b8">${(data.latest_number??0)>=5?'BIG':'SMALL'}</span>
+          </div>
+        </div>
+      </div>
+      <div style="display:flex;justify-content:center">
+        <div class="signal-badge ${sigCls}">${sigTxt}</div>
+      </div>
+    </div>
+
+    ${biasHtml}
+
+    <!-- Main Prediction Card -->
+    <div class="card" style="background:linear-gradient(135deg,rgba(124,58,237,.15),rgba(59,130,246,.1));border-color:rgba(124,58,237,.3)">
+      <div class="card-header">
+        <span class="card-title">🤖 AI Prediction</span>
+        <span style="font-size:9px;color:#475569">${pred.model_used || 'ML'}</span>
+      </div>
+
+      <div class="pred-grid">
+        <!-- Big/Small -->
+        <div class="pred-cell">
+          <div class="pred-label">SIZE</div>
+          <div class="pred-big ${pred.prediction || 'BIG'}">${pred.prediction || '—'}</div>
+        </div>
+        <!-- Colour -->
+        <div class="pred-cell">
+          <div class="pred-label">COLOUR</div>
+          <div class="colour-dots" style="margin:4px 0">${colourDots(pred.colour_prediction)}</div>
+          <div style="font-size:11px;font-weight:700;color:#e2e8f0">${pred.colour_prediction || '—'}</div>
+        </div>
+      </div>
+
+      <!-- Numbers -->
+      <div class="pred-cell" style="margin-bottom:8px">
+        <div class="pred-label" style="margin-bottom:6px">TOP NUMBERS</div>
+        <div class="numballs">${numBalls || '—'}</div>
+      </div>
+
+      <!-- Confidence -->
+      <div class="conf-bar-wrap">
+        <div class="conf-label">
+          <span style="color:${confCol};font-weight:700">${conf}% Combined Confidence</span>
+          <span>${pred.panel_agrees ? '✓ Panel Agrees' : pred.panel_agrees === false ? '≠ Panel Differs' : ''}</span>
+        </div>
+        <div class="conf-bar-track">
+          <div class="conf-bar-fill" style="width:${conf}%;background:${conf>=70?'linear-gradient(90deg,#16a34a,#4ade80)':conf>=55?'linear-gradient(90deg,#d97706,#fbbf24)':'linear-gradient(90deg,#7c3aed,#3b82f6)'}"></div>
+        </div>
+      </div>
+
+      <!-- Reasoning -->
+      <div style="font-size:9px;color:#334155;margin-top:8px;line-height:1.6;padding-top:6px;border-top:1px solid rgba(255,255,255,.05)">
+        ${pred.reasoning || ''}
+      </div>
+    </div>
+
+    <!-- Recent Rounds -->
+    <div class="card">
+      <div class="card-header">
+        <span class="card-title">📊 Recent Rounds</span>
+        <span style="font-size:9px;color:#475569">Last ${rounds.length}</span>
+      </div>
+      <div class="rounds-grid">${roundsHtml}</div>
+    </div>
+
+    <!-- Accuracy -->
+    <div class="card">
+      <div class="card-header">
+        <span class="card-title">📈 Accuracy (last ${acc.total || 0} rounds)</span>
+      </div>
+      <div class="acc-grid">
+        <div class="acc-box">
+          <div class="acc-lbl">Panel</div>
+          <div class="acc-val" style="color:#3b82f6">${panelAcc}%</div>
+          <div class="acc-sub">Big/Small</div>
+        </div>
+        <div class="acc-box">
+          <div class="acc-lbl">AI Server</div>
+          <div class="acc-val" style="color:#a78bfa">${aiAcc}%</div>
+          <div class="acc-sub">Big/Small</div>
+        </div>
+        <div class="acc-box">
+          <div class="acc-lbl">CONFIRMED</div>
+          <div class="acc-val" style="color:#4ade80">${combAcc}%</div>
+          <div class="acc-sub">Both Agree</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Refresh Button -->
+    <button class="refresh-btn" id="refresh-btn" onclick="manualRefresh()">
+      🔄 Refresh Now
+    </button>
+  `;
+}
+
+function renderError(msg) {
+  document.getElementById('content').innerHTML = `
+    <div class="error-card" style="margin-top:40px">
+      <div style="font-size:28px;margin-bottom:10px">⚠️</div>
+      <div style="font-weight:700;margin-bottom:6px">Connection Error</div>
+      <div style="color:#94a3b8;margin-bottom:16px">${msg}</div>
+      <button onclick="manualRefresh()" style="
+        background:rgba(239,68,68,.2);border:1px solid rgba(239,68,68,.3);
+        color:#fca5a5;padding:8px 20px;border-radius:8px;font-family:inherit;
+        font-size:13px;font-weight:700;cursor:pointer">Retry</button>
+    </div>`;
+}
+
+function manualRefresh() {
+  clearTimers();
+  fetchAndRender();
+}
+
+// ── PWA Install ──────────────────────────────────────────────────
+let deferredPrompt = null;
+window.addEventListener('beforeinstallprompt', e => {
+  e.preventDefault();
+  deferredPrompt = e;
+});
+
+// ── Service Worker ───────────────────────────────────────────────
+if ('serviceWorker' in navigator) {
+  navigator.serviceWorker.register('sw.js').catch(()=>{});
+}
+
+// ── Init ─────────────────────────────────────────────────────────
+fetchAndRender();
+</script>
+</body>
+</html>
