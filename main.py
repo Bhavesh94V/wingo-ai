@@ -1,6 +1,7 @@
 import os
 import json
 import asyncio
+import time
 import numpy as np
 import pandas as pd
 from fastapi import FastAPI
@@ -17,6 +18,12 @@ try:
     HAS_XGB = True
 except ImportError:
     HAS_XGB = False
+try:
+    import httpx
+    HAS_HTTPX = True
+except ImportError:
+    HAS_HTTPX = False
+    print("WARNING: httpx not installed — /live endpoint will use Supabase fallback only")
 import warnings
 warnings.filterwarnings('ignore')
 
@@ -490,8 +497,6 @@ async def update_actual(data: dict):
     except Exception as e:
         return {"error": str(e)}
 
-import httpx
-
 # ── /live endpoint: server-side fetch from WinGo draw API ────────
 @app.get("/live/{game_code}")
 async def live_predict(game_code: str):
@@ -503,24 +508,27 @@ async def live_predict(game_code: str):
     rounds_raw = []
 
     # 1. Try WinGo public draw API (no auth needed)
-    draw_urls = [
-        f"https://draw.ar-lottery01.com/WinGo/{game_code}.json",
-        f"https://draw.ar-lottery01.com/WinGo/{game_code}/GetHistoryIssuePage.json",
-    ]
-    async with httpx.AsyncClient(timeout=8.0) as client:
-        for url in draw_urls:
-            try:
-                r = await client.get(url, params={"ts": int(__import__("time").time()*1000)})
-                if r.status_code == 200:
-                    data = r.json()
-                    # Try different response shapes
-                    items = (data.get("data") or data.get("list") or
-                             (data if isinstance(data, list) else []))
-                    if items:
-                        rounds_raw = items[:30]
-                        break
-            except:
-                continue
+    if HAS_HTTPX:
+        draw_urls = [
+            f"https://draw.ar-lottery01.com/WinGo/{game_code}.json",
+            f"https://draw.ar-lottery01.com/WinGo/{game_code}/GetHistoryIssuePage.json",
+        ]
+        try:
+            async with httpx.AsyncClient(timeout=8.0) as client:
+                for url in draw_urls:
+                    try:
+                        r = await client.get(url, params={"ts": int(time.time()*1000)})
+                        if r.status_code == 200:
+                            data = r.json()
+                            items = (data.get("data") or data.get("list") or
+                                     (data if isinstance(data, list) else []))
+                            if items:
+                                rounds_raw = items[:30]
+                                break
+                    except:
+                        continue
+        except:
+            pass
 
     # 2. Fall back to Supabase if draw API unreachable
     if not rounds_raw:
