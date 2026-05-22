@@ -550,89 +550,111 @@ async def fetch_public_wingo(game_code: str) -> list:
     return []
 
 async def auto_predict_once(game_code: str):
-    """Fetch latest rounds → run ML → store prediction. Called by scheduler."""
+    """Fetch latest rounds → run ML → store prediction (only if no script prediction exists)."""
     try:
-        # 1. Try public APIs first
-        raw = await fetch_public_wingo(game_code)
-        source = "draw_api"
+        # ── Step 1: Always use Supabase rounds as primary source ─────────
+        # This ensures scheduler uses SAME data as the script → same predictions
+        db_rounds = fetch_history(game_code, limit=60)
 
-        # 2. Fall back to Supabase history
-        if not raw:
-            db = fetch_history(game_code, limit=60)
-            if db:
-                raw = [{"issueNumber": r.get("period",""), "number": r.get("number",0),
-                        "colour": r.get("colour","red"), "big_small": r.get("big_small","Small")}
-                       for r in db[:30]]
-                source = "supabase"
+        # ── Step 2: Try public APIs to fetch NEW rounds and update Supabase ─
+        raw_api = await fetch_public_wingo(game_code)
+        if raw_api:
+            def _parse_col(num: int, col_str: str) -> str:
+                c = (col_str or "").lower()
+                if c: return c
+                m = {0:"red,violet",1:"green",2:"red",3:"green",4:"red",
+                     5:"green,violet",6:"red",7:"green",8:"red",9:"green"}
+                return m.get(num, "red")
 
-        if not raw or len(raw) < 10:
-            return
-
-        # 3. Parse rounds
-        def _parse_col(num: int, col_str: str) -> str:
-            c = (col_str or "").lower()
-            if c: return c
-            m = {0:"red,violet",1:"green",2:"red",3:"green",4:"red",
-                 5:"green,violet",6:"red",7:"green",8:"red",9:"green"}
-            return m.get(num, "red")
-
-        rounds = []
-        for item in raw:
             try:
-                num = int(item.get("number", 0))
-                col = _parse_col(num, item.get("colour") or item.get("color",""))
-                rounds.append({"number":num, "colour":col, "big_small":"Big" if num>=5 else "Small",
-                                "issueNumber": str(item.get("issueNumber",""))})
-            except: continue
-
-        if len(rounds) < 10: return
-
-        # 4. Store any new rounds in Supabase
-        if source == "draw_api":
-            try:
-                existing = {r.get("period","") for r in fetch_history(game_code, 60)}
-                new_rows = [{"period":r["issueNumber"],"number":r["number"],
-                             "colour":r["colour"],"big_small":r["big_small"],"game_code":game_code}
-                            for r in rounds if r["issueNumber"] and r["issueNumber"] not in existing]
+                existing_periods = {r.get("period","") for r in (db_rounds or [])}
+                new_rows = []
+                for item in raw_api:
+                    try:
+                        num = int(item.get("number", 0))
+                        period_str = str(item.get("issueNumber",""))
+                        if period_str and period_str not in existing_periods:
+                            col = _parse_col(num, item.get("colour") or item.get("color",""))
+                            new_rows.append({
+                                "period": period_str, "number": num,
+                                "colour": col, "big_small": "Big" if num>=5 else "Small",
+                                "game_code": game_code
+                            })
+                    except: continue
                 if new_rows:
                     supabase.table("rounds").insert(new_rows).execute()
-                    # Also fill in actual results for previous AI predictions
-                    for rr in new_rows[:5]:
+                    print(f"[Scheduler] Added {len(new_rows)} new rounds for {game_code}")
+                    # Re-fetch updated rounds
+                    db_rounds = fetch_history(game_code, limit=60)
+                    # Also update actual_results for previous AI predictions
+                    for rr in new_rows[:3]:
                         try:
-                            supabase.table("ai_predictions").update({
-                                "actual_result": "BIG" if rr["number"]>=5 else "SMALL",
-                                "actual_number": rr["number"],
-                                "actual_colour": rr["colour"],
-                                "ai_correct": None,  # will be computed
-                                "panel_correct": None
-                            }).eq("period", rr["period"]).execute()
+                            bs_actual = "BIG" if rr["number"] >= 5 else "SMALL"
+                            # Fetch prediction for this period to check accuracy
+                            pred_rows = supabase.table("ai_predictions").select("id,prediction,panel_pred")\
+                                .eq("period", rr["period"]).eq("game_code", game_code).execute()
+                            for row in (pred_rows.data or []):
+                                ai_ok = (row.get("prediction") == bs_actual)
+                                panel_ok = (row.get("panel_pred") == bs_actual) if row.get("panel_pred") else None
+                                supabase.table("ai_predictions").update({
+                                    "actual_result": bs_actual,
+                                    "actual_number": rr["number"],
+                                    "actual_colour": rr["colour"],
+                                    "ai_correct": ai_ok,
+                                    "panel_correct": panel_ok
+                                }).eq("id", row["id"]).execute()
                         except: pass
-            except: pass
+            except Exception as e:
+                print(f"[Scheduler] Round store error: {e}")
 
-        # 5. Compute next period
+        # ── Step 3: Need at least 10 rounds to predict ───────────────────
+        if not db_rounds or len(db_rounds) < 10:
+            return
+
+        # ── Step 4: Compute next period ───────────────────────────────────
         try:
-            latest_period = rounds[0]["issueNumber"]
+            latest_period = db_rounds[0].get("period", "")
             next_period = str(int(latest_period) + 1) if latest_period.isdigit() else "AUTO"
         except:
             next_period = "AUTO"
 
-        # 6. Run ML prediction (reuse existing predict logic)
+        # ── Step 5: SKIP if script already predicted this period ──────────
+        # This ensures the script's prediction is NEVER overwritten by scheduler
+        try:
+            existing_pred = supabase.table("ai_predictions").select("id,created_at")\
+                .eq("period", next_period).eq("game_code", game_code)\
+                .order("created_at", desc=True).limit(1).execute()
+            if existing_pred.data:
+                # Script already predicted this period — don't overwrite
+                _scheduler_status[game_code] = {
+                    **_scheduler_status.get(game_code, {}),
+                    "last_run": int(time.time()),
+                    "skipped": True,
+                    "last_period": next_period,
+                    "source": "script_exists"
+                }
+                return
+        except:
+            pass  # If check fails, proceed with auto prediction
+
+        # ── Step 6: No script prediction yet — scheduler predicts ─────────
         recent = [RoundData(number=r["number"], colour=r["colour"], big_small=r["big_small"])
-                  for r in rounds[:30]]
+                  for r in db_rounds[:30]]
         req = PredictRequest(game_code=game_code, period=next_period, recent_rounds=recent)
         pred = await predict(req)
 
-        # 7. Update scheduler status
         _scheduler_status[game_code] = {
             "last_run": int(time.time()),
             "last_period": next_period,
-            "source": source,
+            "skipped": False,
+            "source": "supabase",
             "count": _scheduler_status.get(game_code, {}).get("count", 0) + 1
         }
-        print(f"[Scheduler] ✅ {game_code} period={next_period} → {pred.prediction} ({source})")
+        print(f"[Scheduler] ✅ Auto predict {game_code} period={next_period} → {pred.prediction}")
 
     except Exception as e:
         print(f"[Scheduler] ❌ {game_code}: {e}")
+
 
 async def scheduler_loop(game_code: str):
     """Infinite loop: auto-predict every game interval."""
