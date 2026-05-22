@@ -507,6 +507,159 @@ async def update_actual(data: dict):
     except Exception as e:
         return {"error": str(e)}
 
+# ─────────────────────────────────────────────────────────────────────────────
+# ── AUTONOMOUS SCHEDULER (24/7 — no laptop needed) ───────────────────────────
+# ─────────────────────────────────────────────────────────────────────────────
+
+GAME_CODES     = ["WinGo_30S", "WinGo_1Min", "WinGo_3Min", "WinGo_5Min"]
+GAME_INTERVALS = {"WinGo_30S": 32, "WinGo_1Min": 62, "WinGo_3Min": 183, "WinGo_5Min": 302}
+
+# Public WinGo draw APIs — tried in order until one works
+PUBLIC_DRAW_APIS = [
+    "https://draw.ar-lottery01.com/WinGo/{code}.json",
+    "https://draw.ar-lottery01.com/WinGo/{code}/GetHistoryIssuePage.json",
+    "https://draw.tc-lottery.in/WinGo/{code}.json",
+    "https://draw.vdclub.net/WinGo/{code}.json",
+    "https://api.win-go.net/WinGo/{code}/history.json",
+    "https://draw.wingocolor.net/WinGo/{code}.json",
+]
+
+_scheduler_status: dict = {}   # game_code → {last_run, source, count}
+
+async def fetch_public_wingo(game_code: str) -> list:
+    """Try all public draw APIs until one returns data."""
+    if not HAS_HTTPX:
+        return []
+    try:
+        async with httpx.AsyncClient(timeout=8.0, follow_redirects=True) as client:
+            for tpl in PUBLIC_DRAW_APIS:
+                url = tpl.format(code=game_code)
+                try:
+                    r = await client.get(url, params={"ts": int(time.time()*1000)})
+                    if r.status_code == 200:
+                        data = r.json()
+                        items = (data.get("data") or data.get("list") or
+                                 (data if isinstance(data, list) else []))
+                        if isinstance(items, list) and len(items) >= 5:
+                            print(f"[Scheduler] ✅ Got {len(items)} rounds from {url}")
+                            return items[:30]
+                except Exception:
+                    continue
+    except Exception:
+        pass
+    return []
+
+async def auto_predict_once(game_code: str):
+    """Fetch latest rounds → run ML → store prediction. Called by scheduler."""
+    try:
+        # 1. Try public APIs first
+        raw = await fetch_public_wingo(game_code)
+        source = "draw_api"
+
+        # 2. Fall back to Supabase history
+        if not raw:
+            db = fetch_history(game_code, limit=60)
+            if db:
+                raw = [{"issueNumber": r.get("period",""), "number": r.get("number",0),
+                        "colour": r.get("colour","red"), "big_small": r.get("big_small","Small")}
+                       for r in db[:30]]
+                source = "supabase"
+
+        if not raw or len(raw) < 10:
+            return
+
+        # 3. Parse rounds
+        def _parse_col(num: int, col_str: str) -> str:
+            c = (col_str or "").lower()
+            if c: return c
+            m = {0:"red,violet",1:"green",2:"red",3:"green",4:"red",
+                 5:"green,violet",6:"red",7:"green",8:"red",9:"green"}
+            return m.get(num, "red")
+
+        rounds = []
+        for item in raw:
+            try:
+                num = int(item.get("number", 0))
+                col = _parse_col(num, item.get("colour") or item.get("color",""))
+                rounds.append({"number":num, "colour":col, "big_small":"Big" if num>=5 else "Small",
+                                "issueNumber": str(item.get("issueNumber",""))})
+            except: continue
+
+        if len(rounds) < 10: return
+
+        # 4. Store any new rounds in Supabase
+        if source == "draw_api":
+            try:
+                existing = {r.get("period","") for r in fetch_history(game_code, 60)}
+                new_rows = [{"period":r["issueNumber"],"number":r["number"],
+                             "colour":r["colour"],"big_small":r["big_small"],"game_code":game_code}
+                            for r in rounds if r["issueNumber"] and r["issueNumber"] not in existing]
+                if new_rows:
+                    supabase.table("rounds").insert(new_rows).execute()
+                    # Also fill in actual results for previous AI predictions
+                    for rr in new_rows[:5]:
+                        try:
+                            supabase.table("ai_predictions").update({
+                                "actual_result": "BIG" if rr["number"]>=5 else "SMALL",
+                                "actual_number": rr["number"],
+                                "actual_colour": rr["colour"],
+                                "ai_correct": None,  # will be computed
+                                "panel_correct": None
+                            }).eq("period", rr["period"]).execute()
+                        except: pass
+            except: pass
+
+        # 5. Compute next period
+        try:
+            latest_period = rounds[0]["issueNumber"]
+            next_period = str(int(latest_period) + 1) if latest_period.isdigit() else "AUTO"
+        except:
+            next_period = "AUTO"
+
+        # 6. Run ML prediction (reuse existing predict logic)
+        recent = [RoundData(number=r["number"], colour=r["colour"], big_small=r["big_small"])
+                  for r in rounds[:30]]
+        req = PredictRequest(game_code=game_code, period=next_period, recent_rounds=recent)
+        pred = await predict(req)
+
+        # 7. Update scheduler status
+        _scheduler_status[game_code] = {
+            "last_run": int(time.time()),
+            "last_period": next_period,
+            "source": source,
+            "count": _scheduler_status.get(game_code, {}).get("count", 0) + 1
+        }
+        print(f"[Scheduler] ✅ {game_code} period={next_period} → {pred.prediction} ({source})")
+
+    except Exception as e:
+        print(f"[Scheduler] ❌ {game_code}: {e}")
+
+async def scheduler_loop(game_code: str):
+    """Infinite loop: auto-predict every game interval."""
+    interval = GAME_INTERVALS.get(game_code, 35)
+    await asyncio.sleep(5 + GAME_CODES.index(game_code) * 3)  # stagger startup
+    print(f"[Scheduler] 🚀 Starting auto-predict loop for {game_code} every {interval}s")
+    while True:
+        await auto_predict_once(game_code)
+        await asyncio.sleep(interval)
+
+@app.on_event("startup")
+async def start_schedulers():
+    """Launch background prediction loops for all game types on server startup."""
+    for gc in GAME_CODES:
+        asyncio.create_task(scheduler_loop(gc))
+    print("✅ Autonomous 24/7 prediction schedulers started for all game types!")
+
+@app.get("/scheduler/status")
+async def scheduler_status():
+    """Show scheduler health — useful for PWA status indicator."""
+    return {
+        "schedulers": _scheduler_status,
+        "game_codes": GAME_CODES,
+        "active": len(_scheduler_status) > 0,
+        "server_time": int(time.time())
+    }
+
 # ── /live endpoint: server-side fetch from WinGo draw API ────────
 @app.get("/live/{game_code}")
 async def live_predict(game_code: str):

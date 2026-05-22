@@ -183,8 +183,11 @@ body{display:flex;flex-direction:column;height:100dvh}
     <div id="hdr-game" style="font-size:10px;color:#475569;margin-top:1px">30s Game</div>
   </div>
   <div class="hdr-right">
-    <div class="live-pill"><span class="live-dot"></span><span id="live-txt">Live</span></div>
-    <div id="refresh-in" style="font-size:10px;color:#475569;margin-top:3px;text-align:right">Auto: —</div>
+    <div style="display:flex;gap:4px;align-items:center">
+      <div class="live-pill"><span class="live-dot"></span><span id="live-txt">Live</span></div>
+      <div id="auto-mode-pill" style="display:none;background:rgba(74,222,128,.12);border:1px solid rgba(74,222,128,.3);border-radius:20px;padding:2px 7px;font-size:9px;font-weight:800;color:#4ade80">🤖 Auto</div>
+    </div>
+    <div id="refresh-in" style="font-size:10px;color:#475569;margin-top:3px;text-align:right">Syncing...</div>
   </div>
 </div>
 
@@ -392,6 +395,24 @@ function setStatus(msg,live) {
   document.getElementById('status-txt').textContent = msg;
   document.getElementById('live-txt').textContent = live?'Live':'...';
 }
+
+// ── Check if server scheduler is running (24/7 auto-mode) ────────
+async function checkScheduler() {
+  try {
+    const r = await fetch(`${AI_URL}/scheduler/status`, {signal: AbortSignal.timeout(5000)});
+    if (r.ok) {
+      const d = await r.json();
+      const pill = document.getElementById('auto-mode-pill');
+      if (d.active && Object.keys(d.schedulers||{}).length > 0) {
+        pill.style.display = 'block';
+        pill.title = 'Server running 24/7 — predictions work even without laptop!';
+      }
+    }
+  } catch(e) {}
+}
+// Check on load + every 5 min
+checkScheduler();
+setInterval(checkScheduler, 300000);
 
 // ── Render All ───────────────────────────────────────────────────
 function renderAll(panel, ai, rounds, accRows, logRows, sess) {
