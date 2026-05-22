@@ -557,6 +557,11 @@ function renderAll(panel, ai, rounds, accRows, logRows, sess) {
         <span style="font-size:9px;color:#475569">${panel?.conf_label||'Waiting...'}</span>
       </div>
       ${panel ? `
+      <!-- Period badge -->
+      <div style="display:flex;align-items:center;justify-content:space-between;padding:5px 12px;background:rgba(124,58,237,.05);border-bottom:1px solid rgba(124,58,237,.1)">
+        <span style="font-size:9px;color:#475569;font-weight:600">🎯 Predicting Period</span>
+        <span style="font-family:monospace;font-size:11px;font-weight:900;color:#a78bfa;letter-spacing:.5px">${panel.period||'—'}</span>
+      </div>`, ``}
       <div class="card-body">
         <div class="${'main-pred-btn pred-'+(panel.prediction||'BIG')}" style="margin-bottom:8px">
           ${panel.prediction||'—'}
@@ -601,6 +606,11 @@ function renderAll(panel, ai, rounds, accRows, logRows, sess) {
         <span style="font-size:9px;color:#475569">${ai?.model_used?.split('(')[0]?.trim()||'ML Model'}</span>
       </div>
       ${ai ? `
+      <!-- Period badge -->
+      <div style="display:flex;align-items:center;justify-content:space-between;padding:5px 12px;background:rgba(37,99,235,.06);border-bottom:1px solid rgba(96,165,250,.1)">
+        <span style="font-size:9px;color:#475569;font-weight:600">🎯 Predicting Period</span>
+        <span style="font-family:monospace;font-size:11px;font-weight:900;color:#60a5fa;letter-spacing:.5px">${ai.period||'—'}</span>
+      </div>`, ``}
       <div class="card-body">
         <div class="${'main-pred-btn pred-'+(ai.prediction||'BIG')}" style="margin-bottom:8px">
           ${ai.prediction||'—'}
