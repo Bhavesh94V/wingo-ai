@@ -93,14 +93,21 @@ def fetch_history(game_code: str, limit: int = 600):
         return []
 
 def store_ai_prediction(period, game_code, prediction, confidence, colour_pred,
-                        top_numbers, model_used, panel_pred, panel_conf):
+                        top_numbers, model_used, panel_pred, panel_conf,
+                        combined_conf=None, combined_signal=None,
+                        bias_detected=False, bias_direction="", reasoning=""):
     try:
         match_panel = (prediction == panel_pred) if panel_pred else None
         supabase.table("ai_predictions").insert({
             "period": period, "game_code": game_code, "prediction": prediction,
             "confidence": confidence, "colour_pred": colour_pred, "top_numbers": top_numbers,
             "model_used": model_used, "panel_pred": panel_pred or None,
-            "panel_conf": panel_conf or None, "match_panel": match_panel
+            "panel_conf": panel_conf or None, "match_panel": match_panel,
+            "combined_confidence": combined_conf or confidence,
+            "combined_signal": combined_signal or "MODERATE",
+            "bias_detected": bias_detected,
+            "bias_direction": bias_direction or "",
+            "reasoning": (reasoning or "")[:400],
         }).execute()
     except Exception as e:
         print(f"Store error: {e}")
@@ -462,7 +469,10 @@ async def predict(req: PredictRequest):
     # ── Store async ───────────────────────────────────────────
     asyncio.create_task(asyncio.to_thread(
         store_ai_prediction, period, game_code, prediction,
-        confidence, colour_pred, top_nums, model_tag, panel_pred, panel_conf
+        confidence, colour_pred, top_nums, model_tag, panel_pred, panel_conf,
+        combined_conf, combined_signal,
+        bias_info.get("is_biased", False), bias_info.get("bias_direction", ""),
+        reasoning
     ))
 
     return PredictResponse(
