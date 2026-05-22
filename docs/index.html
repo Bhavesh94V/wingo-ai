@@ -217,9 +217,11 @@ const SUPA_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsI
 const AI_URL  = 'https://wingo-ai-kwcs.onrender.com';
 const GAME_INT = {WinGo_30S:30,WinGo_1Min:60,WinGo_3Min:180,WinGo_5Min:300};
 
-let currentGame = 'WinGo_30S';
-let countdown   = 30;
-let cdTimer     = null;
+let currentGame    = 'WinGo_30S';
+let lastPeriod     = null;   // track period changes
+let pollTimer      = null;   // 5s quick-check
+let secsSinceUpd   = 0;
+let ageTimer       = null;
 
 // ── Supabase REST helper ─────────────────────────────────────────
 async function sbFetch(table, params='') {
@@ -238,45 +240,114 @@ async function sbFetch(table, params='') {
 }
 
 // ── Main fetch + render ──────────────────────────────────────────
+// ── Full data fetch + render (called on period change) ────────────
 async function fetchAll() {
-  setStatus('⏳ Fetching...', false);
+  setStatus('⏳ Syncing...', false);
   try {
-    // Independent fetches — one failure won't block others
-    const [panelRows, aiRows, rounds, accRows, logRows] = await Promise.all([
+    const [panelRows, aiRows, rounds, accRows, logRows, sessionRows] = await Promise.all([
       sbFetch('panel_predictions',
         `game_code=eq.${currentGame}&order=created_at.desc&limit=1&select=*`
-      ).catch(e=>{ console.warn('panel_predictions:', e.message); return []; }),
+      ).catch(()=>[]),
 
       sbFetch('ai_predictions',
         `game_code=eq.${currentGame}&order=created_at.desc&limit=1&select=*`
-      ).catch(e=>{ console.warn('ai_predictions latest:', e.message); return []; }),
+      ).catch(()=>[]),
 
       sbFetch('rounds',
         `game_code=eq.${currentGame}&order=created_at.desc&limit=10&select=*`
-      ).catch(e=>{ console.warn('rounds:', e.message); return []; }),
+      ).catch(()=>[]),
 
       sbFetch('ai_predictions',
         `game_code=eq.${currentGame}&ai_correct=not.is.null&order=created_at.desc&limit=50&select=ai_correct,panel_correct,match_panel`
-      ).catch(e=>{ console.warn('acc:', e.message); return []; }),
+      ).catch(()=>[]),
 
       sbFetch('ai_predictions',
         `game_code=eq.${currentGame}&actual_result=not.is.null&order=created_at.desc&limit=10&select=*`
-      ).catch(e=>{ console.warn('logs:', e.message); return []; })
+      ).catch(()=>[]),
+
+      // Session stats: last 30 rounds with actual results
+      sbFetch('ai_predictions',
+        `game_code=eq.${currentGame}&actual_result=not.is.null&order=created_at.desc&limit=30&select=ai_correct,actual_colour,colour_pred,actual_number,top_numbers`
+      ).catch(()=>[])
     ]);
 
     const panel = panelRows?.[0] || null;
     const ai    = aiRows?.[0]    || null;
+    const newPeriod = panel?.period || ai?.period || null;
+    if (newPeriod) lastPeriod = newPeriod;
 
-    renderAll(panel, ai, rounds||[], accRows||[], logRows||[]);
+    const sess = computeSession(sessionRows||[]);
+    renderAll(panel, ai, rounds||[], accRows||[], logRows||[], sess);
     setStatus('✅ Live', true);
     document.getElementById('last-upd').textContent =
       new Date().toLocaleTimeString('en-IN',{hour:'2-digit',minute:'2-digit',second:'2-digit'});
-    startCountdown();
+    startAgeTimer();
   } catch(e) {
     renderError(e.message);
     setStatus('❌ Error', false);
-    startCountdown(15);
   }
+  startPolling();
+}
+
+// ── Light 5-second poll: only full-fetch on period change ─────────
+async function quickCheck() {
+  try {
+    // Check just the latest period (very lightweight)
+    const r = await sbFetch('ai_predictions',
+      `game_code=eq.${currentGame}&order=created_at.desc&limit=1&select=period`
+    ).catch(()=>null);
+    const p = await sbFetch('panel_predictions',
+      `game_code=eq.${currentGame}&order=created_at.desc&limit=1&select=period`
+    ).catch(()=>null);
+    const newPeriod = p?.[0]?.period || r?.[0]?.period;
+    if (newPeriod && newPeriod !== lastPeriod) {
+      // New round! Full fetch
+      await fetchAll();
+      return; // fetchAll calls startPolling at end
+    }
+  } catch(e) {}
+  startPolling();
+}
+
+function startPolling() {
+  if (pollTimer) clearTimeout(pollTimer);
+  pollTimer = setTimeout(quickCheck, 5000); // check every 5s
+}
+
+function startAgeTimer() {
+  if (ageTimer) clearInterval(ageTimer);
+  secsSinceUpd = 0;
+  ageTimer = setInterval(()=>{
+    secsSinceUpd++;
+    document.getElementById('refresh-in').textContent =
+      secsSinceUpd < 60 ? `${secsSinceUpd}s ago` : `${Math.round(secsSinceUpd/60)}m ago`;
+  },1000);
+}
+
+// ── Compute session stats from last 30 rounds with results ────────
+function computeSession(rows) {
+  if (!rows || !rows.length) return null;
+  const total = rows.length;
+  const bsOk  = rows.filter(r => r.ai_correct).length;
+  const colOk = rows.filter(r => {
+    const pred   = (r.colour_pred||'').toLowerCase();
+    const actual = (r.actual_colour||'').toLowerCase();
+    if (!pred || !actual) return false;
+    return actual.split(',').some(a => pred.includes(a.trim())) ||
+           pred.split(/[+/]/).some(p => actual.includes(p.trim()));
+  }).length;
+  const numOk = rows.filter(r => {
+    const top = r.top_numbers;
+    if (!Array.isArray(top) || r.actual_number === null || r.actual_number === undefined) return false;
+    return top.map(Number).includes(Number(r.actual_number));
+  }).length;
+  const bsPct  = Math.round(bsOk  / total * 100);
+  const colPct = Math.round(colOk / total * 100);
+  const numPct = Math.round(numOk / total * 100);
+  const status = bsPct >= 55 ? {txt:'Winning',col:'#4ade80',icon:'🟢'}
+               : bsPct <= 45 ? {txt:'Losing', col:'#f87171',icon:'🔴'}
+               : {txt:'Neutral',col:'#fbbf24',icon:'🟡'};
+  return { total, bsOk, bsPct, colOk, colPct, numOk, numPct, status };
 }
 
 const NUM_COL = n => n===0||n===5?'v': n%2===0?'r':'g';
@@ -300,27 +371,21 @@ function bsColor(v) {
   return v==='BIG'?'#60a5fa':'#4ade80';
 }
 
-// ── Main fetch + render ──────────────────────────────────────────
-
-
-function startCountdown(secs) {
-  if (cdTimer) clearInterval(cdTimer);
-  countdown = secs || GAME_INT[currentGame] || 30;
-  cdTimer = setInterval(()=>{
-    countdown--;
-    document.getElementById('refresh-in').textContent = `Auto: ${countdown}s`;
-    if (countdown<=0){ clearInterval(cdTimer); fetchAll(); }
-  },1000);
+function refresh() {
+  if (pollTimer) clearTimeout(pollTimer);
+  if (ageTimer)  clearInterval(ageTimer);
+  lastPeriod = null; // force full re-render
+  fetchAll();
 }
-
-function refresh() { if(cdTimer) clearInterval(cdTimer); fetchAll(); }
 function selGame(el) {
   document.querySelectorAll('.tab').forEach(t=>t.classList.remove('active'));
   el.classList.add('active');
   currentGame = el.dataset.code;
+  lastPeriod  = null;
   document.getElementById('hdr-game').textContent =
     currentGame.replace('WinGo_','').replace('Min',' Min').replace('S','s') + ' Game';
-  if(cdTimer) clearInterval(cdTimer);
+  if (pollTimer) clearTimeout(pollTimer);
+  if (ageTimer)  clearInterval(ageTimer);
   fetchAll();
 }
 function setStatus(msg,live) {
@@ -329,7 +394,7 @@ function setStatus(msg,live) {
 }
 
 // ── Render All ───────────────────────────────────────────────────
-function renderAll(panel, ai, rounds, accRows, logRows) {
+function renderAll(panel, ai, rounds, accRows, logRows, sess) {
 
   // ── Accuracy ────────────────────────────────────────────────────
   const total      = accRows.length;
@@ -578,23 +643,78 @@ function renderAll(panel, ai, rounds, accRows, logRows) {
       </div>
     </div>
 
-    <!-- Accuracy -->
+    <!-- Session Stats + Accuracy Breakdown -->
     <div class="card">
-      <div class="card-hdr">
-        <div class="card-title">📊 Accuracy</div>
-        <span style="font-size:9px;color:#334155">Last ${total} rounds</span>
+      <div class="card-hdr" style="background:rgba(124,58,237,.06)">
+        <div class="card-title">📈 Session Stats</div>
+        <span style="font-size:9px;color:#334155">Last ${sess?.total||total||0} rounds</span>
       </div>
       <div class="card-body">
+
+        ${sess ? `
+        <!-- Session summary line -->
+        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px">
+          <div style="font-size:13px;font-weight:800;color:#e2e8f0">
+            ${sess.bsOk}/${sess.total} correct
+            <span style="color:${confColor(sess.bsPct)};margin-left:4px">(${sess.bsPct}%)</span>
+          </div>
+          <div style="font-size:11px;font-weight:700;color:${sess.status.col}">
+            ${sess.status.icon} ${sess.status.txt}
+          </div>
+        </div>
+
+        <!-- Accuracy Breakdown -->
+        <div style="font-size:9px;font-weight:800;color:#475569;text-transform:uppercase;letter-spacing:.5px;margin-bottom:8px">
+          🎯 Accuracy Breakdown
+        </div>
+
+        <!-- Big/Small row -->
+        <div style="margin-bottom:8px">
+          <div style="display:flex;justify-content:space-between;font-size:11px;margin-bottom:3px">
+            <span style="color:#94a3b8;font-weight:600">Big/Small</span>
+            <span style="font-weight:800;color:${confColor(sess.bsPct)}">${sess.bsOk}/${sess.total} (${sess.bsPct}%)</span>
+          </div>
+          <div style="height:5px;background:rgba(255,255,255,.06);border-radius:3px;overflow:hidden">
+            <div style="height:100%;width:${sess.bsPct}%;background:${confColor(sess.bsPct)};border-radius:3px;transition:width .6s"></div>
+          </div>
+        </div>
+
+        <!-- Colour row -->
+        <div style="margin-bottom:8px">
+          <div style="display:flex;justify-content:space-between;font-size:11px;margin-bottom:3px">
+            <span style="color:#94a3b8;font-weight:600">Colour</span>
+            <span style="font-weight:800;color:${confColor(sess.colPct)}">${sess.colOk}/${sess.total} (${sess.colPct}%)</span>
+          </div>
+          <div style="height:5px;background:rgba(255,255,255,.06);border-radius:3px;overflow:hidden">
+            <div style="height:100%;width:${sess.colPct}%;background:${confColor(sess.colPct)};border-radius:3px;transition:width .6s"></div>
+          </div>
+        </div>
+
+        <!-- Exact # row -->
+        <div style="margin-bottom:10px">
+          <div style="display:flex;justify-content:space-between;font-size:11px;margin-bottom:3px">
+            <span style="color:#94a3b8;font-weight:600">Exact #</span>
+            <span style="font-weight:800;color:${confColor(sess.numPct)}">${sess.numOk}/${sess.total} (${sess.numPct}%)</span>
+          </div>
+          <div style="height:5px;background:rgba(255,255,255,.06);border-radius:3px;overflow:hidden">
+            <div style="height:100%;width:${sess.numPct}%;background:${confColor(sess.numPct)};border-radius:3px;transition:width .6s"></div>
+          </div>
+        </div>` : `<div class="no-data" style="padding:10px 0">No results yet to compute stats.</div>`}
+
+        <!-- Overall accuracy boxes -->
+        <div style="font-size:9px;font-weight:800;color:#475569;text-transform:uppercase;letter-spacing:.5px;margin-bottom:6px">
+          📊 Panel vs AI vs Combined
+        </div>
         <div class="acc-grid">
           <div class="acc-box">
             <div class="acc-lbl">📊 Panel</div>
             <div class="acc-val" style="color:#60a5fa">${panelAcc!==null?panelAcc+'%':'—'}</div>
-            <div class="acc-lbl">Big/Small</div>
+            <div class="acc-lbl">B/S acc</div>
           </div>
           <div class="acc-box">
             <div class="acc-lbl">🤖 AI</div>
             <div class="acc-val" style="color:#a78bfa">${aiAcc!==null?aiAcc+'%':'—'}</div>
-            <div class="acc-lbl">Big/Small</div>
+            <div class="acc-lbl">B/S acc</div>
           </div>
           <div class="acc-box">
             <div class="acc-lbl">✅ Both</div>
