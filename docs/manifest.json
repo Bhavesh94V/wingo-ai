@@ -2,7 +2,7 @@
   "name": "WinGo Predictor",
   "short_name": "WinGo AI",
   "description": "AI-powered WinGo prediction companion app",
-  "start_url": "/wingo-ai/",
+  "start_url": "/wg-elite/",
   "display": "standalone",
   "background_color": "#0a0a14",
   "theme_color": "#7c3aed",

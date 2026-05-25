@@ -1,4 +1,4 @@
-﻿<!DOCTYPE html>
+<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="UTF-8"/>
@@ -215,9 +215,57 @@ body{display:flex;flex-direction:column;height:100dvh}
 </div>
 
 <script>
+// ── Password Protection ──────────────────────────────────────────
+(function checkPassword() {
+  const PWD_KEY = 'wg_pwa_auth';
+  const EXP_KEY = 'wg_pwa_exp';
+  const EXPECTED = 'BHAVESH9104VV';
+  
+  let isAuthed = false;
+  try {
+    const stored = localStorage.getItem(PWD_KEY);
+    const exp = localStorage.getItem(EXP_KEY);
+    if (stored === EXPECTED && exp && Date.now() < parseInt(exp)) {
+      isAuthed = true;
+    }
+  } catch(e) {}
+  
+  if (!isAuthed) {
+    document.body.innerHTML = `
+      <div style="position:fixed;inset:0;background:#0f0f1a;z-index:999999;display:flex;flex-direction:column;align-items:center;justify-content:center;padding:20px;font-family:'Outfit',sans-serif">
+        <h1 style="background:linear-gradient(90deg,#a78bfa,#60a5fa);-webkit-background-clip:text;-webkit-text-fill-color:transparent;margin-bottom:10px;font-weight:900;font-size:28px">🔒 wg-elite</h1>
+        <div style="color:#94a3b8;font-size:14px;margin-bottom:30px;font-weight:600">Premium Access Required</div>
+        <input type="password" id="wg-pwd-in" placeholder="Enter Access Code" style="background:#151525;border:1px solid rgba(168,85,247,.4);padding:14px;border-radius:10px;color:#fff;width:100%;max-width:300px;font-size:16px;margin-bottom:15px;text-align:center;outline:none" />
+        <button id="wg-pwd-btn" style="background:linear-gradient(90deg,#7c3aed,#3b82f6);color:#fff;border:none;padding:14px;width:100%;max-width:300px;border-radius:10px;font-size:16px;font-weight:800;cursor:pointer;box-shadow:0 8px 20px rgba(124,58,237,.3)">Unlock Access</button>
+        <div id="wg-pwd-err" style="color:#f87171;margin-top:15px;font-size:14px;font-weight:600;display:none;background:rgba(248,113,113,.1);padding:8px 16px;border-radius:6px">Invalid Access Code</div>
+      </div>
+    `;
+    const btn = document.getElementById('wg-pwd-btn');
+    const inp = document.getElementById('wg-pwd-in');
+    const auth = () => {
+      const val = inp.value.trim();
+      if (val === EXPECTED) {
+        // 30 days = 30 * 24 * 60 * 60 * 1000
+        localStorage.setItem(PWD_KEY, val);
+        localStorage.setItem(EXP_KEY, Date.now() + 2592000000);
+        location.reload();
+      } else {
+        const err = document.getElementById('wg-pwd-err');
+        err.style.display = 'block';
+        setTimeout(() => err.style.display = 'none', 3000);
+      }
+    };
+    btn.addEventListener('click', auth);
+    inp.addEventListener('keypress', (e) => { if(e.key === 'Enter') auth() });
+    
+    // Stop further script execution by throwing error
+    throw new Error('wg-elite: Authentication Required');
+  }
+})();
+
 const SUPA_URL = 'https://npbpjsdxisdutcruwkgr.supabase.co';
 const SUPA_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im5wYnBqc2R4aXNkdXRjcnV3a2dyIiwicm9sZSI6ImFub24iLCJpYXQiOjE3Nzk0MzMxOTEsImV4cCI6MjA5NTAwOTE5MX0.Td38AsexT9B7C6LSuFBml3QVFaaMn-m-rcJgXtQ_uIU';
-const AI_URL  = 'https://wingo-ai-kwcs.onrender.com';
+const AI_URL  = 'https://wingo-ai-vois.onrender.com';
 const GAME_INT = {WinGo_30S:30,WinGo_1Min:60,WinGo_3Min:180,WinGo_5Min:300};
 
 let currentGame    = 'WinGo_30S';
@@ -247,7 +295,7 @@ async function sbFetch(table, params='') {
 async function fetchAll() {
   setStatus('⏳ Syncing...', false);
   try {
-    const [panelRows, aiRows, rounds, accRows, logRows, sessionRows] = await Promise.all([
+    const [panelRows, aiRows, rounds, accRows, logRows, sessionRows, expertRows] = await Promise.all([
       sbFetch('panel_predictions',
         `game_code=eq.${currentGame}&order=created_at.desc&limit=1&select=*`
       ).catch(()=>[]),
@@ -271,6 +319,11 @@ async function fetchAll() {
       // Session stats: last 30 rounds with actual results
       sbFetch('ai_predictions',
         `game_code=eq.${currentGame}&actual_result=not.is.null&order=created_at.desc&limit=30&select=ai_correct,actual_colour,colour_pred,actual_number,top_numbers`
+      ).catch(()=>[]),
+
+      // ProSignal / Expert stats
+      sbFetch('expert_predictions',
+        `game_code=eq.${currentGame}&order=created_at.desc&limit=50&select=*`
       ).catch(()=>[])
     ]);
 
@@ -280,7 +333,7 @@ async function fetchAll() {
     if (newPeriod) lastPeriod = newPeriod;
 
     const sess = computeSession(sessionRows||[]);
-    renderAll(panel, ai, rounds||[], accRows||[], logRows||[], sess);
+    renderAll(panel, ai, rounds||[], accRows||[], logRows||[], sess, expertRows||[]);
     setStatus('✅ Live', true);
     document.getElementById('last-upd').textContent =
       new Date().toLocaleTimeString('en-IN',{hour:'2-digit',minute:'2-digit',second:'2-digit'});
@@ -415,7 +468,7 @@ checkScheduler();
 setInterval(checkScheduler, 300000);
 
 // ── Render All ───────────────────────────────────────────────────
-function renderAll(panel, ai, rounds, accRows, logRows, sess) {
+function renderAll(panel, ai, rounds, accRows, logRows, sess, expertRows = []) {
 
   // ── Accuracy ────────────────────────────────────────────────────
   const total      = accRows.length;
@@ -423,6 +476,11 @@ function renderAll(panel, ai, rounds, accRows, logRows, sess) {
   const panelAcc   = total ? Math.round(accRows.filter(r=>r.panel_correct).length/total*100) : null;
   const agreed     = accRows.filter(r=>r.match_panel);
   const agreeedAcc = agreed.length ? Math.round(agreed.filter(r=>r.ai_correct).length/agreed.length*100) : null;
+
+  // ProSignal Accuracy
+  const psValid = expertRows.filter(r => r.actual_result !== null);
+  const psAcc = psValid.length ? Math.round(psValid.filter(r => r.is_correct).length / psValid.length * 100) : null;
+  const ps = expertRows[0] || null;
 
   // ── Combined Signal ─────────────────────────────────────────────
   let sigClass='signal-MODERATE', sigIcon='🔵', sigMain='Moderate Signal', sigSub='Waiting for both predictions';
@@ -506,7 +564,7 @@ function renderAll(panel, ai, rounds, accRows, logRows, sess) {
       const rowBg   = pBSok===null?'transparent':pBSok?'rgba(74,222,128,.04)':'rgba(248,113,113,.04)';
       const pNums   = (r.top_numbers||[]).slice(0,3).map(n=>nBall(n,20)).join('');
       const aiNums  = (JSON.parse(typeof r.top_numbers==='string'?r.top_numbers:'[]')||[]).slice(0,3).map(n=>nBall(n,20)).join('');
-      return `
+      let html = `
         <tr class="log-entry-hdr" style="background:${rowBg}">
           <td colspan="4" style="color:#334155;font-size:9px">
             #${periodShort} &nbsp; ACTUAL: <span style="display:inline-flex;align-items:center;gap:3px">
@@ -527,6 +585,19 @@ function renderAll(panel, ai, rounds, accRows, logRows, sess) {
           <td><span style="font-size:9px;font-weight:700;color:${bsColor(r.prediction)}">${r.prediction||'—'}</span></td>
           <td><div style="display:flex;gap:2px">${aiNums||'—'}</div></td>
         </tr>`;
+      
+      const expertMatch = expertRows.find(e => String(e.period) === String(r.period));
+      if (expertMatch) {
+        const eBSok = expertMatch.is_correct;
+        html += `
+        <tr class="log-prosignal" style="background:${rowBg}">
+          <td style="font-size:9px;color:#34d399;font-weight:700;padding:1px 6px 4px;white-space:nowrap">🔮Pro</td>
+          <td style="text-align:center;font-size:11px">${eBSok===null?'—':eBSok?'✅':'❌'}</td>
+          <td><span style="font-size:9px;font-weight:700;color:${bsColor(expertMatch.prediction)}">${expertMatch.prediction||'—'}</span></td>
+          <td><div style="display:flex;gap:2px">${expertMatch.number!==null?nBall(expertMatch.number,20):'<span style="color:#64748b;font-size:9px">—</span>'}</div></td>
+        </tr>`;
+      }
+      return html;
     }).join('');
     logHtml = `
       <table class="log-table">
@@ -663,6 +734,43 @@ function renderAll(panel, ai, rounds, accRows, logRows, sess) {
       </div>` : `<div class="no-data">No AI prediction yet.<br>AI server may be waking up...</div>`}
     </div>
 
+    <!-- ProSignal Card (WinGo 1Min only) -->
+    ${currentGame === 'WinGo_1Min' ? `
+    <div class="card" style="border-color:rgba(16,185,129,.2);margin-bottom:8px">
+      <div class="card-hdr" style="background:rgba(16,185,129,.07)">
+        <div class="card-title">🔮 ProSignal Intelligence</div>
+        <span style="font-size:9px;background:rgba(16,185,129,.2);color:#6ee7b7;padding:2px 6px;border-radius:4px">1MIN ONLY</span>
+      </div>
+      ${ps ? `
+      <div style="display:flex;align-items:center;justify-content:space-between;padding:5px 12px;background:rgba(16,185,129,.05);border-bottom:1px solid rgba(16,185,129,.1)">
+        <span style="font-size:9px;color:#475569;font-weight:600">🎯 Predicting Period</span>
+        <span style="font-family:monospace;font-size:11px;font-weight:900;color:#34d399;letter-spacing:.5px">${ps.period||'—'}</span>
+      </div>
+      <div class="card-body">
+        <div class="${'main-pred-btn pred-'+(ps.prediction||'BIG')}" style="margin-bottom:8px">
+          ${ps.prediction||'—'}
+        </div>
+        <div class="stats-grid">
+          <div class="stat-box">
+            <div class="stat-label">COLOUR</div>
+            <div class="col-dots" style="margin:2px 0">${colDots(ps.colour||'')}</div>
+            <div style="font-size:9px;color:#94a3b8;margin-top:2px">${ps.colour||'—'}</div>
+          </div>
+          <div class="stat-box">
+            <div class="stat-label">NUMBER</div>
+            <div class="nballs" style="flex-wrap:wrap;gap:3px;margin-top:2px;justify-content:center">
+              ${ps.number !== null ? nBall(ps.number,24) : '<span style="color:#64748b">—</span>'}
+            </div>
+          </div>
+          <div class="stat-box">
+            <div class="stat-label">ACCURACY</div>
+            <div class="stat-val" style="color:${confColor(psAcc||0)}">${psAcc||0}%</div>
+            <div style="font-size:9px;color:#334155">${psValid.length} signals</div>
+          </div>
+        </div>
+      </div>` : `<div class="no-data">Waiting for Telegram signal...</div>`}
+    </div>` : ''}
+
     <!-- Recent Rounds -->
     <div class="card">
       <div class="card-hdr">
@@ -734,7 +842,7 @@ function renderAll(panel, ai, rounds, accRows, logRows, sess) {
 
         <!-- Overall accuracy boxes -->
         <div style="font-size:9px;font-weight:800;color:#475569;text-transform:uppercase;letter-spacing:.5px;margin-bottom:6px">
-          📊 Panel vs AI vs Combined
+          📊 Panel vs AI vs ${currentGame === 'WinGo_1Min' ? 'ProSignal' : 'Combined'}
         </div>
         <div class="acc-grid">
           <div class="acc-box">
@@ -748,9 +856,9 @@ function renderAll(panel, ai, rounds, accRows, logRows, sess) {
             <div class="acc-lbl">B/S acc</div>
           </div>
           <div class="acc-box">
-            <div class="acc-lbl">✅ Both</div>
-            <div class="acc-val" style="color:#4ade80">${agreeedAcc!==null?agreeedAcc+'%':'—'}</div>
-            <div class="acc-lbl">Confirmed</div>
+            <div class="acc-lbl">${currentGame === 'WinGo_1Min' ? '🔮 ProSignal' : '✅ Both'}</div>
+            <div class="acc-val" style="color:#4ade80">${currentGame === 'WinGo_1Min' ? (psAcc!==null?psAcc+'%':'—') : (agreeedAcc!==null?agreeedAcc+'%':'—')}</div>
+            <div class="acc-lbl">${currentGame === 'WinGo_1Min' ? 'WinRate' : 'Confirmed'}</div>
           </div>
         </div>
       </div>

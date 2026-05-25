@@ -792,3 +792,120 @@ async def live_predict(game_code: str):
         "data_source":      "draw_api" if rounds_raw and not all(r.get("period","") in [""] for r in rounds_raw[:1]) else "supabase"
     }
 
+
+# ── ProSignal API endpoints ───────────────────────────────────────
+
+def fetch_expert_accuracy(game_code: str = "WinGo_1Min") -> dict:
+    """
+    Calculate ProSignal (Telegram expert) accuracy from expert_predictions table.
+    Compares `prediction` against `actual_result` for rows where result is known.
+    """
+    try:
+        res = supabase.table("expert_predictions")\
+            .select("prediction,actual_result,is_correct")\
+            .eq("game_code", game_code)\
+            .not_.is_("actual_result", "null")\
+            .order("created_at", desc=True)\
+            .limit(100)\
+            .execute()
+        rows = res.data or []
+        if not rows:
+            return {"accuracy": 0, "total": 0, "correct": 0}
+        correct = sum(1 for r in rows if r.get("is_correct"))
+        return {
+            "accuracy": round(correct / len(rows) * 100, 1),
+            "total":    len(rows),
+            "correct":  correct,
+        }
+    except Exception as e:
+        print(f"[ProSignal Accuracy Error] {e}")
+        return {"accuracy": 0, "total": 0, "correct": 0}
+
+
+async def update_expert_results(game_code: str = "WinGo_1Min"):
+    """
+    Background helper: matches expert_predictions periods against rounds table.
+    When a period's actual result is known, updates is_correct in Supabase.
+    """
+    try:
+        # Fetch unresolved expert predictions
+        unresolved = supabase.table("expert_predictions")\
+            .select("id,period,prediction")\
+            .eq("game_code", game_code)\
+            .is_("actual_result", "null")\
+            .order("created_at", desc=True)\
+            .limit(50)\
+            .execute()
+        rows = unresolved.data or []
+        if not rows:
+            return
+
+        # Fetch actual results from rounds table
+        periods = [r["period"] for r in rows]
+        actuals_res = supabase.table("rounds")\
+            .select("period,big_small")\
+            .eq("game_code", game_code)\
+            .in_("period", periods)\
+            .execute()
+        actuals = {r["period"]: r["big_small"] for r in (actuals_res.data or [])}
+
+        # Update each matched row
+        for row in rows:
+            actual = actuals.get(row["period"])
+            if not actual:
+                continue
+            # Normalize: rounds uses "Big"/"Small", expert uses "BIG"/"SMALL"
+            actual_upper = actual.upper()
+            pred_upper   = (row["prediction"] or "").upper()
+            is_correct   = (pred_upper == actual_upper)
+            supabase.table("expert_predictions").update({
+                "actual_result": actual,
+                "is_correct":    is_correct,
+            }).eq("id", row["id"]).execute()
+
+    except Exception as e:
+        print(f"[ProSignal Result Update Error] {e}")
+
+
+@app.get("/prosignal/latest")
+async def prosignal_latest(game_code: str = "WinGo_1Min", limit: int = 10):
+    """
+    Returns the latest ProSignal (Telegram expert) predictions for the PWA.
+    Also triggers a background result-update so accuracy stays fresh.
+    """
+    # Trigger background result matching (non-blocking)
+    asyncio.create_task(update_expert_results(game_code))
+
+    try:
+        res = supabase.table("expert_predictions")\
+            .select("*")\
+            .eq("game_code", game_code)\
+            .order("created_at", desc=True)\
+            .limit(limit)\
+            .execute()
+        rows = res.data or []
+    except Exception as e:
+        return {"error": str(e), "predictions": []}
+
+    accuracy = fetch_expert_accuracy(game_code)
+
+    return {
+        "game_code":   game_code,
+        "predictions": rows,
+        "latest":      rows[0] if rows else None,
+        "accuracy":    accuracy,
+        "source":      "ProSignal",
+    }
+
+
+@app.get("/prosignal/accuracy")
+async def prosignal_accuracy(game_code: str = "WinGo_1Min"):
+    """
+    Returns only ProSignal accuracy stats — lightweight endpoint for comparison widget.
+    """
+    accuracy = fetch_expert_accuracy(game_code)
+    return {
+        "game_code": game_code,
+        "prosignal": accuracy,
+        "source":    "ProSignal",
+    }
