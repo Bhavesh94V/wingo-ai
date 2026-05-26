@@ -868,7 +868,7 @@ function renderAll(panel, ai, rounds, accRows, logRows, sess, expertRows = []) {
     <div class="card" style="margin-bottom:60px">
       <div class="card-hdr">
         <div class="card-title">📋 Prediction Logs</div>
-        <span style="font-size:9px;color:#334155">Panel + AI</span>
+        <span style="font-size:9px;color:#334155">${currentGame === 'WinGo_1Min' ? 'Panel + AI + ProSignal' : 'Panel + AI'}</span>
       </div>
       <div class="card-body" style="padding:6px 0">${logHtml}</div>
     </div>
