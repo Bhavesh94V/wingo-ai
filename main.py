@@ -356,7 +356,7 @@ def get_bias(game_code: str):
     return detect_bias(history)
 
 @app.post("/predict", response_model=PredictResponse)
-async def predict(req: PredictRequest):
+def predict(req: PredictRequest):
     game_code  = req.game_code
     period     = req.period or ""
     panel_pred = (req.panel_prediction or "").upper()
@@ -517,7 +517,7 @@ async def predict(req: PredictRequest):
     )
 
 @app.post("/update_actual")
-async def update_actual(data: dict):
+def update_actual(data: dict):
     try:
         period     = data.get("period")
         actual_num = data.get("actual_number")
