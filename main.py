@@ -92,22 +92,52 @@ def fetch_history(game_code: str, limit: int = 600):
         print(f"Fetch error: {e}")
         return []
 
+_last_store_period = {}  # rate-limit: track last stored period per game_code
+
+def sanitize_text(text: str, max_len: int = 400) -> str:
+    """Remove emoji/unicode that causes Cloudflare 400 on Supabase POST."""
+    import re
+    # Remove emoji and non-ASCII characters that cause JSON generation errors
+    cleaned = re.sub(r'[^\x00-\x7F]+', '', str(text or ''))
+    # Remove common emoji patterns even if ASCII-encoded
+    cleaned = re.sub(r'\\u[0-9a-fA-F]{4}', '', cleaned)
+    return cleaned[:max_len].strip()
+
 def store_ai_prediction(period, game_code, prediction, confidence, colour_pred,
                         top_numbers, model_used, panel_pred, panel_conf,
                         combined_conf=None, combined_signal=None,
                         bias_detected=False, bias_direction="", reasoning=""):
     try:
+        # Rate-limit: don't store same period twice within 10s
+        key = f"{game_code}_{period}"
+        now = time.time()
+        if _last_store_period.get(key, 0) > now - 10:
+            return  # skip duplicate
+        _last_store_period[key] = now
+
         match_panel = (prediction == panel_pred) if panel_pred else None
+        # Sanitize all string fields to avoid Cloudflare 400 bad request
+        safe_reasoning = sanitize_text(reasoning, 400)
+        safe_signal    = sanitize_text(combined_signal or 'MODERATE', 20)
+        safe_bias_dir  = sanitize_text(bias_direction or '', 30)
+        safe_model     = sanitize_text(model_used or '', 60)
+        safe_colour    = sanitize_text(colour_pred or 'Red', 30)
+        # Ensure top_numbers is a plain list of ints
+        safe_top = [int(n) for n in (top_numbers or [])[:5]]
         supabase.table("ai_predictions").insert({
-            "period": period, "game_code": game_code, "prediction": prediction,
-            "confidence": confidence, "colour_pred": colour_pred, "top_numbers": top_numbers,
-            "model_used": model_used, "panel_pred": panel_pred or None,
-            "panel_conf": panel_conf or None, "match_panel": match_panel,
-            "combined_confidence": combined_conf or confidence,
-            "combined_signal": combined_signal or "MODERATE",
-            "bias_detected": bias_detected,
-            "bias_direction": bias_direction or "",
-            "reasoning": (reasoning or "")[:400],
+            "period": str(period or ''), "game_code": str(game_code or ''),
+            "prediction": str(prediction or 'BIG'),
+            "confidence": float(confidence or 50.0),
+            "colour_pred": safe_colour, "top_numbers": safe_top,
+            "model_used": safe_model,
+            "panel_pred": str(panel_pred) if panel_pred else None,
+            "panel_conf": float(panel_conf) if panel_conf else None,
+            "match_panel": match_panel,
+            "combined_confidence": float(combined_conf or confidence or 50.0),
+            "combined_signal": safe_signal,
+            "bias_detected": bool(bias_detected),
+            "bias_direction": safe_bias_dir,
+            "reasoning": safe_reasoning,
         }).execute()
     except Exception as e:
         print(f"Store error: {e}")
@@ -314,6 +344,7 @@ def predict_top_numbers(big_small, num_model, x_pred):
 def root(): return {"status": "Wingo AI Server v4.0 ✅", "xgboost": HAS_XGB}
 
 @app.get("/health")
+@app.head("/health")  # Render.com health checks use HEAD
 def health(): return {"status": "ok", "version": "4.0.0", "xgboost": HAS_XGB}
 
 @app.get("/accuracy/{game_code}")
