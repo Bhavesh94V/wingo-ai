@@ -4,7 +4,7 @@ import asyncio
 import time
 import numpy as np
 import pandas as pd
-from fastapi import FastAPI
+from fastapi import FastAPI, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import List, Optional
@@ -356,7 +356,7 @@ def get_bias(game_code: str):
     return detect_bias(history)
 
 @app.post("/predict", response_model=PredictResponse)
-def predict(req: PredictRequest):
+def predict(req: PredictRequest, background_tasks: BackgroundTasks):
     game_code  = req.game_code
     period     = req.period or ""
     panel_pred = (req.panel_prediction or "").upper()
@@ -498,13 +498,13 @@ def predict(req: PredictRequest):
     )
 
     # ── Store async ───────────────────────────────────────────
-    asyncio.create_task(asyncio.to_thread(
+    background_tasks.add_task(
         store_ai_prediction, period, game_code, prediction,
         confidence, colour_pred, top_nums, model_tag, panel_pred, panel_conf,
         combined_conf, combined_signal,
         bias_info.get("is_biased", False), bias_info.get("bias_direction", ""),
         reasoning
-    ))
+    )
 
     return PredictResponse(
         period=period, prediction=prediction, confidence=confidence,
