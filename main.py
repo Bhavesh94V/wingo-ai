@@ -672,7 +672,8 @@ async def auto_predict_once(game_code: str):
         recent = [RoundData(number=r["number"], colour=r["colour"], big_small=r["big_small"])
                   for r in db_rounds[:30]]
         req = PredictRequest(game_code=game_code, period=next_period, recent_rounds=recent)
-        pred = await predict(req)
+        bg = BackgroundTasks()
+        pred = await asyncio.to_thread(predict, req, bg)
 
         _scheduler_status[game_code] = {
             "last_run": int(time.time()),
