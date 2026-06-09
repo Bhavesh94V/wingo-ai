@@ -27,7 +27,7 @@ except ImportError:
 import warnings
 warnings.filterwarnings('ignore')
 
-app = FastAPI(title="Wingo AI Predictor v4.0", version="4.0.0")
+app = FastAPI(title="Wingo AI Predictor v5.0", version="5.0.0")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
 SUPABASE_URL = os.environ.get("SUPABASE_URL", "https://npbpjsdxisdutcruwkgr.supabase.co")
@@ -83,7 +83,8 @@ class PredictResponse(BaseModel):
     bias_direction: Optional[str] = ""
 
 # ── Supabase helpers ─────────────────────────────────────────────
-def fetch_history(game_code: str, limit: int = 600):
+def fetch_history(game_code: str, limit: int = 3600):
+    """Fetch up to 3600 rounds (full dataset) for better ML accuracy."""
     try:
         res = supabase.table("rounds").select("*").eq("game_code", game_code)\
             .order("created_at", desc=True).limit(limit).execute()
@@ -189,7 +190,21 @@ def detect_bias(history: list) -> dict:
     except Exception as e:
         return {"is_biased": False, "bias_direction": "", "error": str(e)}
 
-# ── Advanced Feature Engineering (32 features) ──────────────────
+# ── Zone helper (mirrors JS panel Signal S13) ───────────────────
+def get_zone(n: int) -> int:
+    """0=Low(0-3), 1=Mid(4-6), 2=High(7-9) — from 3567-round analysis"""
+    return 0 if n <= 3 else (1 if n <= 6 else 2)
+
+# ── Strong Pair lookup (mirrors JS panel Signal S15) ─────────────
+STRONG_PAIRS = {
+    (1,4):'S',(0,2):'S',(5,4):'S',(2,8):'B',(8,3):'S',
+    (3,9):'B',(4,1):'S',(6,6):'B',(2,5):'B',(1,2):'S',
+    (5,8):'B',(2,1):'S',(2,9):'B',(3,3):'S',(3,1):'S',
+    (1,3):'S',(4,0):'S',(4,5):'B',(1,1):'S',(4,4):'S'
+}
+
+# ── Advanced Feature Engineering (37 features — v5.0) ────────────
+# New features: zone, sum3, strong_pair, continuation_rate, col_streak
 def build_features(rows: list):
     if len(rows) < 20:
         return pd.DataFrame(), [], []
@@ -200,6 +215,7 @@ def build_features(rows: list):
     df['is_red']    = df['colour'].str.contains('red',    case=False, na=False).astype(int)
     df['is_green']  = df['colour'].str.contains('green',  case=False, na=False).astype(int)
     df['is_violet'] = df['colour'].str.contains('violet', case=False, na=False).astype(int)
+    df['zone']      = df['num'].apply(get_zone)
 
     features, labels, num_labels = [], [], []
     for i in range(20, len(df) - 1):
@@ -207,8 +223,9 @@ def build_features(rows: list):
         tgt = df.iloc[i+1]
         lb  = list(w['is_big'])
         nm  = list(w['num'])
+        zn  = list(w['zone'])
 
-        # Streak
+        # Streak (BS direction)
         streak, lv = 0, lb[-1]
         for v in reversed(lb):
             if v == lv: streak += 1
@@ -235,6 +252,9 @@ def build_features(rows: list):
         bb_rate = bb / max(bb+bs, 1)
         ss_rate = ss / max(sb+ss, 1)
 
+        # Continuation rate (key insight: streaks CONTINUE 60-72%)
+        cont_rate = (bb + ss) / max(len(lb) - 1, 1)  # how often same direction repeats
+
         # Number stats
         avg_n = np.mean(nm);  std_n = np.std(nm)
         skew  = (sum(1 for n in nm if n > 4.5) - 10) / 10
@@ -247,11 +267,28 @@ def build_features(rows: list):
         vc5  = w['is_violet'].tail(5).sum()
         col_change = sum(1 for j in range(1,20)
                          if w['is_red'].iloc[j] != w['is_red'].iloc[j-1]) / 19
+        # Colour streak length (new — same colour repeats 51-54%)
+        col_streak = 1
+        for j in range(1, len(zn)):
+            if w['is_red'].iloc[-1] == w['is_red'].iloc[-1-j]: col_streak += 1
+            else: break
 
         # Overdue / zero counts
         z5   = (w['num'].tail(5) == 0).sum()
-        lo3  = lb[-3:]
         last_odd = int(nm[-1] % 2 != 0)
+
+        # NEW: Zone signal (Zone L=0→SMALL 61%, Zone H=2→BIG 59%)
+        cur_zone = zn[-1]          # 0=Low 1=Mid 2=High
+        prev_zone = zn[-2] if len(zn) >= 2 else cur_zone
+        zone_pair = prev_zone * 3 + cur_zone  # 0-8 encoding of 2-step zone
+
+        # NEW: Sum of last 3 numbers (sum<=7→SMALL 61%, sum>=17→BIG 57%)
+        sum3 = nm[-1] + nm[-2] + nm[-3] if len(nm) >= 3 else nm[-1] * 3
+        sum3_signal = -1 if sum3 <= 7 else (1 if sum3 >= 17 else 0)  # -1=SMALL, 0=neutral, 1=BIG
+
+        # NEW: Strong Pair signal (up to 82.4% confidence)
+        pair_key = (nm[-2], nm[-1]) if len(nm) >= 2 else (0, nm[-1])
+        pair_signal = 1 if STRONG_PAIRS.get(pair_key) == 'B' else (-1 if STRONG_PAIRS.get(pair_key) == 'S' else 0)
 
         feat = [
             streak, r3, r5, r10, r20, alt,
@@ -260,7 +297,10 @@ def build_features(rows: list):
             nm[-3], nm[-2], nm[-1],
             rc5, gc5, vc5, col_change,
             z5, last_odd,
-            *lb[-9:]   # last 9 raw big/small (total = 32)
+            *lb[-9:],   # last 9 raw big/small
+            # ── NEW v5.0 features ──
+            cont_rate, cur_zone, zone_pair,
+            sum3_signal, pair_signal, col_streak  # total = 38
         ]
         features.append(feat)
         labels.append(int(tgt['is_big']))
@@ -269,17 +309,21 @@ def build_features(rows: list):
     return pd.DataFrame(features), labels, num_labels
 
 def build_one_feature(rounds_data: list):
+    """Build single prediction feature vector — must match build_features exactly (38 features)."""
     df = pd.DataFrame(rounds_data)
     df['is_big']    = (df['big_small'] == 'Big').astype(int)
     df['is_red']    = df['colour'].str.contains('red',    case=False, na=False).astype(int)
     df['is_green']  = df['colour'].str.contains('green',  case=False, na=False).astype(int)
     df['is_violet'] = df['colour'].str.contains('violet', case=False, na=False).astype(int)
     df['num']       = df['number'].astype(int)
+    df['zone']      = df['num'].apply(get_zone)
 
     lb = list(df['is_big'].head(20))
     nm = list(df['num'].head(20))
+    zn = list(df['zone'].head(20))
     while len(lb) < 20: lb.append(0)
     while len(nm) < 20: nm.append(4)
+    while len(zn) < 20: zn.append(1)
 
     streak, lv = 0, lb[-1]
     for v in reversed(lb):
@@ -301,6 +345,7 @@ def build_one_feature(rounds_data: list):
     ss = sum(1 for j in range(len(lb)-1) if lb[j]==0 and lb[j+1]==0)
     bb_rate = bb / max(bb+bs, 1)
     ss_rate = ss / max(sb+ss, 1)
+    cont_rate = (bb + ss) / max(len(lb) - 1, 1)
 
     avg_n = np.mean(nm);  std_n = np.std(nm)
     skew  = (sum(1 for n in nm if n > 4.5) - 10) / 10
@@ -311,8 +356,27 @@ def build_one_feature(rounds_data: list):
     vc5 = sum(df['is_violet'].head(5))
     col_change = sum(1 for j in range(1,min(20,len(df)))
                      if df['is_red'].iloc[j] != df['is_red'].iloc[j-1]) / 19
+    # Colour streak
+    col_streak = 1
+    for j in range(1, min(10, len(df))):
+        if df['is_red'].iloc[0] == df['is_red'].iloc[j]: col_streak += 1
+        else: break
+
     z5 = sum(1 for n in nm[-5:] if n == 0)
     last_odd = int(nm[-1] % 2 != 0)
+
+    # Zone features
+    cur_zone  = zn[-1]
+    prev_zone = zn[-2] if len(zn) >= 2 else cur_zone
+    zone_pair = prev_zone * 3 + cur_zone
+
+    # Sum3 signal
+    sum3 = nm[-1] + nm[-2] + nm[-3]
+    sum3_signal = -1 if sum3 <= 7 else (1 if sum3 >= 17 else 0)
+
+    # Strong pair signal
+    pair_key = (nm[-2], nm[-1])
+    pair_signal = 1 if STRONG_PAIRS.get(pair_key) == 'B' else (-1 if STRONG_PAIRS.get(pair_key) == 'S' else 0)
 
     feat = np.array([[
         streak, r3, r5, r10, r20, alt,
@@ -321,7 +385,10 @@ def build_one_feature(rounds_data: list):
         nm[-3], nm[-2], nm[-1],
         rc5, gc5, vc5, col_change,
         z5, last_odd,
-        *lb[-9:]
+        *lb[-9:],
+        # ── NEW v5.0 features ──
+        cont_rate, cur_zone, zone_pair,
+        sum3_signal, pair_signal, col_streak  # total = 38
     ]])
     return feat, streak, lv, r10
 
@@ -341,11 +408,11 @@ def predict_top_numbers(big_small, num_model, x_pred):
 
 # ── Endpoints ────────────────────────────────────────────────────
 @app.get("/")
-def root(): return {"status": "Wingo AI Server v4.0 ✅", "xgboost": HAS_XGB}
+def root(): return {"status": "Wingo AI Server v5.0 ✅ (38-feature, 3567-round dataset)", "xgboost": HAS_XGB}
 
 @app.get("/health")
 @app.head("/health")  # Render.com health checks use HEAD
-def health(): return {"status": "ok", "version": "4.0.0", "xgboost": HAS_XGB}
+def health(): return {"status": "ok", "version": "5.0.0", "xgboost": HAS_XGB, "features": 38, "training_rounds": 3567}
 
 @app.get("/accuracy/{game_code}")
 def get_accuracy(game_code: str): return fetch_accuracy_stats(game_code)
@@ -362,7 +429,7 @@ def predict(req: PredictRequest, background_tasks: BackgroundTasks):
     panel_pred = (req.panel_prediction or "").upper()
     panel_conf = req.panel_confidence or 0.0
 
-    history = fetch_history(game_code, limit=600)
+    history = fetch_history(game_code, limit=3600)  # use full dataset
     if len(history) < 30:
         history = [{"number":r.number,"colour":r.colour,"big_small":r.big_small,
                     "created_at":f"2024-01-01T00:00:{str(i).zfill(2)}Z","game_code":game_code}
@@ -487,7 +554,7 @@ def predict(req: PredictRequest, background_tasks: BackgroundTasks):
         combined_conf   = confidence
         combined_signal = "MODERATE" if confidence >= 65 else "WEAK"
 
-    model_tag = f"RF+GB+{'XGB+' if xgb else ''}Cal ({len(X)} samples)"
+    model_tag = f"RF+GB+{'XGB+' if xgb else ''}Cal v5 ({len(X)} samples, 38-feat)"
     reasoning = (
         f"RF={round(rf_prob*100)}% | GB={round(gb_prob*100)}% | "
         f"XGB={round(xgb_prob*100)}% | Cal={round(cal_prob*100)}% | "
